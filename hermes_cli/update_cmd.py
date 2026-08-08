@@ -2837,7 +2837,9 @@ def _venv_core_imports_healthy() -> tuple[bool, str]:
     return True, ""
 
 def _detect_venv_python_processes(
-    *, exclude_pids: set[int] | None = None
+    *,
+    exclude_pids: set[int] | None = None,
+    root: Path | None = None,
 ) -> list[tuple[int, str, str]]:
     """Find live processes running from the project venv's interpreter.
 
@@ -2862,15 +2864,19 @@ def _detect_venv_python_processes(
     except Exception:
         return []
 
-    venv_dir = _m().PROJECT_ROOT / "venv"
+    # Desktop's preflight may need to inspect its mutable install even when an
+    # editable development checkout shadows this module on PYTHONPATH. Keep
+    # the target explicit instead of inferring it from the imported source.
+    project_root = Path(root) if root is not None else _m().PROJECT_ROOT
+    venv_dir = project_root / "venv"
     try:
         venv_prefix = str(venv_dir.resolve()).lower().rstrip(os.sep) + os.sep
     except OSError:
         venv_prefix = str(venv_dir).lower().rstrip(os.sep) + os.sep
     try:
-        root_prefix = str(_m().PROJECT_ROOT.resolve()).lower().rstrip(os.sep) + os.sep
+        root_prefix = str(project_root.resolve()).lower().rstrip(os.sep) + os.sep
     except OSError:
-        root_prefix = str(_m().PROJECT_ROOT).lower().rstrip(os.sep) + os.sep
+        root_prefix = str(project_root).lower().rstrip(os.sep) + os.sep
 
     skip: set[int] = set(exclude_pids or set())
     skip.add(os.getpid())
@@ -2892,12 +2898,14 @@ def _detect_venv_python_processes(
             continue
         pid = info.get("pid")
         exe = info.get("exe")
-        if not exe or pid is None or int(pid) in skip:
+        if pid is None or int(pid) in skip:
             continue
-        try:
-            exe_norm = str(Path(exe).resolve()).lower()
-        except (OSError, ValueError):
-            exe_norm = str(exe).lower()
+        exe_norm = ""
+        if exe:
+            try:
+                exe_norm = str(Path(exe).resolve()).lower()
+            except (OSError, ValueError):
+                exe_norm = str(exe).lower()
         cmdline_raw = " ".join(info.get("cmdline") or [])
         cmdline_low = cmdline_raw.lower()
         cwd_low = str(info.get("cwd") or "").lower().rstrip(os.sep) + os.sep
@@ -2917,7 +2925,7 @@ def _detect_venv_python_processes(
                 is_holder = True
         if not is_holder:
             continue
-        name = info.get("name") or Path(exe).name
+        name = info.get("name") or Path(exe or (info.get("cmdline") or ["python"])[0]).name
         matches.append((int(pid), str(name), cmdline_raw[:120]))
     return matches
 

@@ -32,10 +32,11 @@ import {
 import nodePty from 'node-pty'
 
 import { classifyActiveRuntime } from './active-runtime-state'
-import { stopBackendChild as stopBackendChildImpl } from './backend-child'
+import { stopBackendChild as stopBackendChildImpl, stopBackendTreesForUpdate } from './backend-child'
 import { dashboardFallbackArgs, sourceDeclaresServe } from './backend-command'
 import { createBackendConnectionState } from './backend-connection-state'
 import { buildDesktopBackendEnv, hermesManagedNodePathEntries, normalizeHermesHomeRoot } from './backend-env'
+import { clearMcpBridgeQuiesceMarker, writeMcpBridgeQuiesceMarker } from './mcp-bridge-quiesce'
 import { isReauthRequiredError, waitForHermesReady } from './backend-health'
 import {
   canImportHermesCli,
@@ -210,7 +211,12 @@ import {
   spawnUpdaterProcess,
   stagedUpdaterSupportsPrewrittenMarker
 } from './updater-process'
-import { formatBlockerMessage, formatProbeFailedMessage, scanVenvBlockers } from './venv-blocker-scan'
+import {
+  formatBlockerMessage,
+  formatProbeFailedMessage,
+  scanVenvBlockers,
+  terminateMcpBridge
+} from './venv-blocker-scan'
 import { fetchMarketplaceThemes, searchMarketplaceThemes } from './vscode-marketplace'
 import { createWakeIndicatorWindowController } from './wake-indicator-window'
 import {
@@ -2780,6 +2786,23 @@ async function releaseBackendLockForUpdate(updateRoot) {
   return releaseBackendLock(updateRoot, 'updates')
 }
 
+async function confirmMcpBridgeShutdown(bridges) {
+  const result = await dialog.showMessageBox(mainWindow || undefined, {
+    type: 'warning',
+    title: 'Pause Codex Hermes tools to update',
+    buttons: ['Cancel update', 'Pause Codex tools and continue'],
+    cancelId: 0,
+    defaultId: 0,
+    noLink: true,
+    message: `Codex is using Hermes tools (${bridges.length} process${bridges.length === 1 ? '' : 'es'}).`,
+    detail:
+      'Updating Hermes must stop these tool bridges. This interrupts any in-progress Codex tool calls; ' +
+      'new Codex tool bridges will remain paused until the update finishes.\n\n' +
+      bridges.slice(0, 8).map(bridge => `PID ${bridge.pid}  ${bridge.name}`).join('\n')
+  })
+  return result.response === 1
+}
+
 // Shared backend teardown + venv-shim unlock wait. Used by BOTH the self-update
 // hand-off and the desktop uninstaller — they have the identical Windows
 // problem: the desktop's backend (and the grandchildren IT spawned — a hermes
@@ -2795,34 +2818,15 @@ async function releaseBackendLock(updateRoot, tag) {
     return { unlocked: true }
   }
 
-  // Collect every backend PID the desktop owns: primary window backend + pool.
-  const pids = []
   const hermesProcess = backendConnectionState.getProcess()
 
-  if (hermesProcess && Number.isInteger(hermesProcess.pid)) {
-    pids.push(hermesProcess.pid)
-  }
-
-  for (const entry of backendPool.values()) {
-    if (entry.process && Number.isInteger(entry.process.pid)) {
-      pids.push(entry.process.pid)
-    }
-  }
-
-  // Graceful first (lets Python flush), then tree-kill to catch grandchildren.
-  if (hermesProcess && !hermesProcess.killed) {
-    try {
-      hermesProcess.kill('SIGTERM')
-    } catch {
-      void 0
-    }
-  }
-
-  stopAllPoolBackends()
-
-  for (const pid of pids) {
-    forceKillProcessTree(pid)
-  }
+  // On Windows ChildProcess.kill('SIGTERM') is immediate process termination,
+  // not a graceful Python drain. Killing it before taskkill loses the parent
+  // links taskkill /T needs to reap its descendants.
+  stopBackendTreesForUpdate(hermesProcess, {
+    forceKillProcessTree,
+    stopAllPoolBackends
+  })
 
   const shim = venvHermesShimPath(updateRoot)
   const deadlineMs = Date.now() + 15000
@@ -2888,6 +2892,8 @@ async function applyUpdates(opts = {}) {
   }
 
   updateInFlight = true
+  let mcpBridgeQuiesceOwned = false
+  let mcpBridgeQuiesceHandedOff = false
 
   try {
     const updater = resolveUpdaterBinary()
@@ -3009,13 +3015,69 @@ async function applyUpdates(opts = {}) {
       const scanOutcome = await scanVenvBlockers(updateRoot)
 
       if (scanOutcome.kind === 'blocked') {
-        const message = formatBlockerMessage(scanOutcome.result)
+        const bridges = scanOutcome.result.mcpBridges
+        const bridgeOnly = scanOutcome.result.processes.length === 0 && bridges.length > 0
 
-        rememberLog(`[updates] venv-blocked: ${scanOutcome.result.processes.length} process(es) hold the install`)
-        emitUpdateProgress({ stage: 'error', message, percent: null })
-        startHermes().catch(() => {})
+        if (bridgeOnly) {
+          const accepted = await confirmMcpBridgeShutdown(bridges)
 
-        return { ok: false, error: 'venv-blocked', message }
+          if (!accepted) {
+            const message = 'Update cancelled. Codex Hermes tool bridges are still running.'
+            rememberLog('[updates] Codex bridge shutdown was declined')
+            emitUpdateProgress({ stage: 'error', message, percent: null })
+            startHermes().catch(() => {})
+            return { ok: false, error: 'mcp-bridge-shutdown-declined', message }
+          }
+
+          if (!writeMcpBridgeQuiesceMarker(HERMES_HOME)) {
+            const message = 'Update aborted: Hermes could not pause Codex tool bridges safely.'
+            rememberLog('[updates] could not write Codex bridge quiesce marker')
+            emitUpdateProgress({ stage: 'error', message, percent: null })
+            startHermes().catch(() => {})
+            return { ok: false, error: 'mcp-bridge-quiesce-failed', message }
+          }
+          mcpBridgeQuiesceOwned = true
+
+          // The Python side re-reads argv, executable, and creation time
+          // immediately before terminating each PID. Do not use /T here:
+          // descendants are not proven venv holders and may belong to Codex.
+          const stopped = await Promise.all(bridges.map(bridge => terminateMcpBridge(updateRoot, bridge)))
+          rememberLog(
+            `[updates] requested stop for ${bridges.length} consented Codex bridge(s); ${stopped.filter(Boolean).length} verified`
+          )
+
+          await new Promise(resolve => setTimeout(resolve, 1000))
+          const firstRescan = await scanVenvBlockers(updateRoot)
+          let secondRescan = firstRescan
+          if (firstRescan.kind === 'clear') {
+            await new Promise(resolve => setTimeout(resolve, 1000))
+            secondRescan = await scanVenvBlockers(updateRoot)
+          }
+
+          if (secondRescan.kind === 'clear') {
+            // The quiesce marker remains through the detached updater. A
+            // bridge Codex respawns during the install exits before mapping
+            // venv extensions; the new Desktop clears it after the update.
+          } else {
+            clearMcpBridgeQuiesceMarker(HERMES_HOME, process.pid)
+            const message =
+              secondRescan.kind === 'blocked'
+                ? 'Update aborted: Codex tool bridges did not stop cleanly. Retry after their active work finishes.'
+                : formatProbeFailedMessage()
+            rememberLog('[updates] Codex bridge quiesce did not produce two clear scans')
+            emitUpdateProgress({ stage: 'error', message, percent: null })
+            startHermes().catch(() => {})
+            return { ok: false, error: 'mcp-bridge-quiesce-incomplete', message }
+          }
+        } else {
+          const message = formatBlockerMessage(scanOutcome.result)
+
+          rememberLog(`[updates] venv-blocked: ${scanOutcome.result.processes.length} process(es) hold the install`)
+          emitUpdateProgress({ stage: 'error', message, percent: null })
+          startHermes().catch(() => {})
+
+          return { ok: false, error: 'venv-blocked', message }
+        }
       }
 
       if (scanOutcome.kind === 'probe-failure') {
@@ -3041,6 +3103,15 @@ async function applyUpdates(opts = {}) {
       detached: true,
       stdio: 'ignore'
     })
+
+    // Keep the bridge-specific gate alive after this Electron process exits.
+    // The staged updater is the new owner for the full mutation window; this
+    // does not alter its shared update-marker contract.
+    if (mcpBridgeQuiesceOwned && Number.isInteger(child.pid)) {
+      if (!writeMcpBridgeQuiesceMarker(HERMES_HOME, child.pid)) {
+        rememberLog('[updates] could not transfer Codex bridge quiesce marker to updater process')
+      }
+    }
 
     // Write the update-in-progress marker IMMEDIATELY — before the 2.5s
     // quit dwell. The Tauri updater won't write its own marker for several
@@ -3073,12 +3144,16 @@ async function applyUpdates(opts = {}) {
     // relaunches us when it's done. (#50419 — a 600ms quit looked like a crash
     // and lured users into the #50238 relaunch loop.)
     isQuittingForHandoff = true
+    mcpBridgeQuiesceHandedOff = mcpBridgeQuiesceOwned
     setTimeout(() => {
       app.quit()
     }, UPDATE_HANDOFF_DWELL_MS)
 
     return { ok: true, handedOff: true, updater }
   } finally {
+    if (mcpBridgeQuiesceOwned && !mcpBridgeQuiesceHandedOff) {
+      clearMcpBridgeQuiesceMarker(HERMES_HOME, process.pid)
+    }
     updateInFlight = false
   }
 }
@@ -11979,6 +12054,14 @@ app.on('open-url', (event, url) => {
 })
 
 app.whenReady().then(() => {
+  // A successful updater releases its shared marker before relaunching us.
+  // Only then may Codex's Hermes-tools bridge start again; keeping the
+  // bridge-specific marker through the updater closes the whole mutation
+  // window, not just the first preflight scan.
+  if (!readLiveUpdateMarker(HERMES_HOME)) {
+    clearMcpBridgeQuiesceMarker(HERMES_HOME)
+  }
+
   const systemCa = installWindowsSystemCaTrust(tls)
 
   if (systemCa.applied) {

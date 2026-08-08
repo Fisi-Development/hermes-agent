@@ -24,9 +24,15 @@ export interface VenvBlockerProcess {
   cmdline: string
 }
 
+export interface McpBridgeProcess extends VenvBlockerProcess {
+  createdAt: number
+}
+
 export interface VenvBlockerScanResult {
   blocked: boolean
   processes: VenvBlockerProcess[]
+  mcpBridges: McpBridgeProcess[]
+  pausableGateways: number
 }
 
 export type ScanOutcome =
@@ -94,18 +100,53 @@ export function parseVenvBlockerScanOutput(raw: string): ScanOutcome {
     processes.push({ pid, name, cmdline })
   }
 
-  // Reject inconsistent combinations
-  if (parsed.blocked && processes.length === 0) {
+  // An older scanner knows nothing about MCP bridges. Treat its result as a
+  // normal all-blocking scan rather than guessing which processes are safe to
+  // offer for consent.
+  const rawMcpBridges = parsed.mcp_bridges === undefined ? [] : parsed.mcp_bridges
+  if (!Array.isArray(rawMcpBridges)) {
+    return { kind: 'probe-failure', error: 'mcp_bridges must be an array' }
+  }
+
+  const mcpBridges: McpBridgeProcess[] = []
+  for (const entry of rawMcpBridges) {
+    if (!entry || typeof entry !== 'object') {
+      return { kind: 'probe-failure', error: 'MCP bridge entry must be an object' }
+    }
+    const { pid, name, cmdline, created_at: createdAt } = entry
+    if (!Number.isInteger(pid) || pid <= 0) {
+      return { kind: 'probe-failure', error: 'MCP bridge pid must be a positive integer' }
+    }
+    if (typeof name !== 'string' || name.length === 0 || typeof cmdline !== 'string') {
+      return { kind: 'probe-failure', error: 'MCP bridge name and cmdline must be strings' }
+    }
+    if (typeof createdAt !== 'number' || !Number.isFinite(createdAt) || createdAt <= 0) {
+      return { kind: 'probe-failure', error: 'MCP bridge created_at must be a positive number' }
+    }
+    mcpBridges.push({ pid, name, cmdline, createdAt })
+  }
+
+  if (mcpBridges.some(bridge => processes.some(proc => proc.pid === bridge.pid))) {
+    return { kind: 'probe-failure', error: 'a PID cannot be both a blocker and an MCP bridge' }
+  }
+
+  const pausableGateways = parsed.pausable_gateways === undefined ? 0 : parsed.pausable_gateways
+  if (!Number.isInteger(pausableGateways) || pausableGateways < 0) {
+    return { kind: 'probe-failure', error: 'pausable_gateways must be a non-negative integer' }
+  }
+
+  // Reject inconsistent combinations.
+  if (parsed.blocked && processes.length + mcpBridges.length === 0) {
     return { kind: 'probe-failure', error: 'blocked is true but process list is empty' }
   }
 
-  if (!parsed.blocked && processes.length > 0) {
+  if (!parsed.blocked && (processes.length > 0 || mcpBridges.length > 0)) {
     return { kind: 'probe-failure', error: 'blocked is false but process list is non-empty' }
   }
 
   return parsed.blocked
-    ? { kind: 'blocked', result: { blocked: true, processes } }
-    : { kind: 'clear', result: { blocked: false, processes } }
+    ? { kind: 'blocked', result: { blocked: true, processes, mcpBridges, pausableGateways } }
+    : { kind: 'clear', result: { blocked: false, processes, mcpBridges, pausableGateways } }
 }
 
 /**
@@ -121,20 +162,29 @@ export async function scanVenvBlockers(
 ): Promise<ScanOutcome> {
   const execFn = execOverride || execFileAsync
   const resolveFn = resolveOverride || resolveVenvPython
-  const venvPython = resolveFn(updateRoot)
+  let scanRoot: string
+  try {
+    scanRoot = fs.realpathSync.native(updateRoot)
+  } catch {
+    return { kind: 'probe-failure', error: 'update root could not be resolved' }
+  }
+  const venvPython = resolveFn(scanRoot)
 
   if (!venvPython) {
     return { kind: 'probe-failure', error: 'venv python not found' }
   }
 
   let stdout: string
+  const env = { ...process.env }
+  delete env.PYTHONPATH
 
   try {
-    const proc = await execFn(venvPython, ['-m', SCAN_MODULE], {
-      cwd: updateRoot,
+    const proc = await execFn(venvPython, ['-m', SCAN_MODULE, '--root', scanRoot], {
+      cwd: scanRoot,
       encoding: 'utf-8',
       timeout: SCAN_TIMEOUT_MS,
-      windowsHide: true
+      windowsHide: true,
+      env
     } as any)
 
     stdout = String((proc as any).stdout ?? '')
@@ -149,6 +199,50 @@ export async function scanVenvBlockers(
   }
 
   return parseVenvBlockerScanOutput(stdout)
+}
+
+/** Terminate one bridge the user explicitly consented to stop. */
+export async function terminateMcpBridge(
+  updateRoot: string,
+  bridge: McpBridgeProcess,
+  execOverride?: typeof execFileAsync,
+  resolveOverride?: typeof resolveVenvPython
+): Promise<boolean> {
+  const execFn = execOverride || execFileAsync
+  const resolveFn = resolveOverride || resolveVenvPython
+  let scanRoot: string
+  try {
+    scanRoot = fs.realpathSync.native(updateRoot)
+  } catch {
+    return false
+  }
+  const venvPython = resolveFn(scanRoot)
+  if (!venvPython) {
+    return false
+  }
+
+  const env = { ...process.env }
+  delete env.PYTHONPATH
+  try {
+    const proc = await execFn(
+      venvPython,
+      [
+        '-m',
+        SCAN_MODULE,
+        '--root',
+        scanRoot,
+        '--terminate-mcp-bridge',
+        String(bridge.pid),
+        '--created-at',
+        String(bridge.createdAt)
+      ],
+      { cwd: scanRoot, encoding: 'utf-8', timeout: SCAN_TIMEOUT_MS, windowsHide: true, env } as any
+    )
+    const parsed = JSON.parse(String((proc as any).stdout ?? ''))
+    return parsed?.ok === true && parsed?.terminated === true
+  } catch {
+    return false
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -191,10 +285,17 @@ export function formatBlockerMessage(result: VenvBlockerScanResult): string {
     lines.push(`  ... and ${result.processes.length - 10} more`)
   }
 
+  if (result.mcpBridges.length > 0) {
+    lines.push('')
+    lines.push('Codex Hermes tool bridges are also using this installation:')
+    for (const bridge of result.mcpBridges.slice(0, 5)) {
+      lines.push(`  PID ${bridge.pid}  ${bridge.name}`)
+    }
+  }
+
   lines.push('')
   lines.push(
-    'Close the terminal, app, or service owning that process.  If it is a ' +
-      'remote backend, stopping it will disconnect remote clients.'
+    'Close the terminal, app, or service owning that process.'
   )
   lines.push('Then retry the update.')
 

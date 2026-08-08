@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 
 import { test } from 'vitest'
 
-import { stopBackendChild } from './backend-child'
+import { stopBackendChild, stopBackendTreesForUpdate } from './backend-child'
 import { hiddenWindowsChildOptions } from './windows-child-options'
 
 test('hiddenWindowsChildOptions adds windowsHide:true on Windows when unset', () => {
@@ -129,4 +129,22 @@ test('stopBackendChild swallows errors thrown by the kill strategy', () => {
       isWindows: false
     })
   })
+})
+
+test('Windows update tree-kills the primary root before pool teardown without pre-signalling it', () => {
+  const primary = makeChild({ pid: 101 })
+  const pooled = makeChild({ pid: 202 })
+  const events: string[] = []
+
+  stopBackendTreesForUpdate(primary.child, {
+    forceKillProcessTree: pid => events.push(`tree:${pid}`),
+    stopAllPoolBackends: () => {
+      events.push('pool-stop')
+      events.push(`tree:${pooled.child.pid}`)
+    }
+  })
+
+  assert.deepEqual(events, ['tree:101', 'pool-stop', 'tree:202'])
+  assert.deepEqual(primary.calls, [], 'the primary root must not be signalled before taskkill sees it')
+  assert.deepEqual(pooled.calls, [])
 })

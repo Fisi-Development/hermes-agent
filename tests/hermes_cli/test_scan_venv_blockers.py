@@ -9,6 +9,7 @@ from __future__ import annotations
 import builtins
 import json
 import sys
+import tempfile
 import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -17,6 +18,7 @@ import pytest
 
 import agent.redact as redact_module
 from hermes_cli._scan_venv_blockers import (
+    _is_hermes_tools_mcp_command,
     _is_pausable_gateway,
     _redact_sensitive_cmdline,
     main,
@@ -151,17 +153,35 @@ def test_is_pausable_gateway_rejects_everything_else(cmdline: str) -> None:
     assert _is_pausable_gateway(cmdline) is False
 
 
-def _run_main_with_detector(monkeypatch, capsys, matches):
+def _run_main_with_detector(monkeypatch, capsys, matches, *, argv=None):
     """Run main() with the process detector patched to return *matches*."""
     for name, mod in _psutil_fake().items():
         monkeypatch.setitem(sys.modules, name, mod)
     import hermes_cli.main as cli_main
 
-    monkeypatch.setattr(cli_main, "_detect_venv_python_processes", lambda: matches)
+    monkeypatch.setattr(cli_main, "_detect_venv_python_processes", lambda **_kwargs: matches)
+    with tempfile.TemporaryDirectory() as raw_root:
+        root = Path(raw_root)
+        (root / "venv").mkdir()
+        (root / "hermes_cli").mkdir()
+        monkeypatch.setattr(sys, "prefix", str(root / "venv"))
+        argv = argv or ["--root", str(root)]
+        with pytest.raises(SystemExit) as excinfo:
+            main(argv)
+        out = capsys.readouterr().out
+        return excinfo.value.code, json.loads(out)
+
+
+def test_main_requires_an_explicit_target_root(monkeypatch, capsys):
+    for name, mod in _psutil_fake().items():
+        monkeypatch.setitem(sys.modules, name, mod)
+
     with pytest.raises(SystemExit) as excinfo:
-        main()
-    out = capsys.readouterr().out
-    return excinfo.value.code, json.loads(out)
+        main([])
+
+    data = json.loads(capsys.readouterr().out)
+    assert excinfo.value.code == 1
+    assert data["ok"] is False
 
 
 def test_main_exempts_gateway_chain_but_keeps_other_holders(monkeypatch, capsys):
@@ -212,3 +232,80 @@ def test_main_desktop_serve_backend_still_blocks(monkeypatch, capsys):
     assert data["blocked"] is True
     assert [p["pid"] for p in data["processes"]] == [78]
     assert data["pausable_gateways"] == 0
+
+
+def test_mcp_bridge_command_requires_the_exact_stdio_launch() -> None:
+    assert _is_hermes_tools_mcp_command(
+        ["python.exe", "-m", "agent.transports.hermes_tools_mcp_server"]
+    )
+    assert not _is_hermes_tools_mcp_command(
+        ["python.exe", "-m", "agent.transports.hermes_tools_mcp_server", "--verbose"]
+    )
+    assert not _is_hermes_tools_mcp_command(
+        ["python.exe", "-m", "agent.transports.codex_app_server"]
+    )
+
+
+def test_main_reports_mcp_bridge_as_a_blocker_for_explicit_desktop_consent(monkeypatch, capsys):
+    import hermes_cli._scan_venv_blockers as scan
+
+    bridge = (
+        90,
+        "python.exe",
+        r"C:\target\venv\Scripts\python.exe -m agent.transports.hermes_tools_mcp_server",
+    )
+    monkeypatch.setattr(
+        scan,
+        "_live_mcp_bridge",
+        lambda pid, _root: {
+            "pid": pid,
+            "name": "python.exe",
+            "cmdline": bridge[2],
+            "created_at": 123.5,
+        },
+    )
+
+    code, data = _run_main_with_detector(
+        monkeypatch,
+        capsys,
+        [bridge],
+    )
+
+    assert code == 0
+    assert data["blocked"] is True
+    assert data["processes"] == []
+    assert data["mcp_bridges"] == [
+        {
+            "pid": 90,
+            "name": "python.exe",
+            "cmdline": bridge[2],
+            "created_at": 123.5,
+        }
+    ]
+
+
+def test_main_keeps_mixed_mcp_and_unknown_holders_blocking(monkeypatch, capsys):
+    import hermes_cli._scan_venv_blockers as scan
+
+    bridge = (90, "python.exe", r"C:\target\venv\Scripts\python.exe -m agent.transports.hermes_tools_mcp_server")
+    repl = (91, "python.exe", r"C:\target\venv\Scripts\python.exe")
+    monkeypatch.setattr(
+        scan,
+        "_live_mcp_bridge",
+        lambda pid, _root: (
+            {"pid": pid, "name": "python.exe", "cmdline": bridge[2], "created_at": 123.5}
+            if pid == 90
+            else None
+        ),
+    )
+
+    code, data = _run_main_with_detector(
+        monkeypatch,
+        capsys,
+        [bridge, repl],
+    )
+
+    assert code == 0
+    assert data["blocked"] is True
+    assert [proc["pid"] for proc in data["processes"]] == [91]
+    assert [proc["pid"] for proc in data["mcp_bridges"]] == [90]
