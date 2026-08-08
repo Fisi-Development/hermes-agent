@@ -50,7 +50,6 @@ import logging
 import os
 import sys
 import threading
-import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -61,8 +60,6 @@ logger = logging.getLogger(__name__)
 # from the updater's shared ownership marker: the bridge must quiesce before
 # the staged updater can take over that marker.
 _UPDATE_QUIESCE_MARKER = ".hermes-venv-quiesce"
-_UPDATE_MARKER = ".hermes-update-in-progress"
-_UPDATE_MARKER_MAX_AGE_SECONDS = 20 * 60
 _QUIESCE_POLL_SECONDS = 1.0
 
 # JSON Schema type -> Python type mapping for signature generation
@@ -88,53 +85,22 @@ def _update_quiesce_marker_path() -> Path:
 
 
 def _pid_alive(pid: int) -> bool:
-    """Check marker ownership without importing venv-backed Hermes modules."""
-    if pid <= 0:
-        return False
-    if os.name != "nt":
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        except OSError:
-            return False
-        return True
+    """Compatibility export for tests; implementation is stdlib-only."""
+    from hermes_mcp_update_gate import _pid_alive as check_pid_alive
 
-    try:
-        import ctypes
-
-        process = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
-        if not process:
-            # Access denied is a live foreign owner for update-safety purposes.
-            return ctypes.get_last_error() == 5
-        try:
-            exit_code = ctypes.c_ulong()
-            if not ctypes.windll.kernel32.GetExitCodeProcess(process, ctypes.byref(exit_code)):
-                return True
-            return exit_code.value == 259  # STILL_ACTIVE
-        finally:
-            ctypes.windll.kernel32.CloseHandle(process)
-    except Exception:
-        return False
+    return check_pid_alive(pid)
 
 
 def _live_marker(path: Path) -> bool:
-    """Read the shared marker format with a dead-PID and age self-heal."""
-    try:
-        pid_line, started_line, *_ = path.read_text(encoding="utf-8").splitlines()
-        pid = int(pid_line.strip())
-        age = time.time() - float(started_line.strip())
-    except (OSError, ValueError):
-        return False
-    return 0 <= age <= _UPDATE_MARKER_MAX_AGE_SECONDS and _pid_alive(pid)
+    """Read the bridge marker format with a dead-PID and age self-heal."""
+    from hermes_mcp_update_gate import live_quiesce_marker
+
+    return live_quiesce_marker(path.parent)
 
 
 def _update_quiesce_requested() -> bool:
-    """Whether a live update or Desktop quiesce gate owns this bridge's venv."""
-    home = _update_quiesce_marker_path().parent
-    return _live_marker(home / _UPDATE_MARKER) or _live_marker(_update_quiesce_marker_path())
+    """Whether a consented Desktop quiesce gate owns this bridge's venv."""
+    return _live_marker(_update_quiesce_marker_path())
 
 
 def _watch_for_update_quiesce(

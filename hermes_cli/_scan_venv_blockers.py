@@ -129,32 +129,6 @@ def _is_pausable_gateway(cmdline: str) -> bool:
     return looks_like_gateway_command_line(cmdline)
 
 
-def _has_pausable_gateway_ancestor(pid: int) -> bool:
-    """Return True only when a fully readable ancestor is ``gateway run``.
-
-    Gateway-owned venv grandchildren are paused by the downstream CLI updater,
-    so reporting them here would abort before that owner can run. Any missing
-    process or unreadable command line remains a blocker.
-    """
-    try:
-        import psutil  # noqa: PLC0415
-
-        parents = psutil.Process(int(pid)).parents()
-    except Exception:
-        return False
-
-    for parent in parents:
-        try:
-            parts = parent.cmdline()
-        except Exception:
-            return False
-        if not parts:
-            return False
-        if _is_pausable_gateway(" ".join(str(part) for part in parts)):
-            return True
-    return False
-
-
 def _venv_prefix(root: Path) -> str:
     try:
         return str((root / "venv").resolve()).lower().rstrip(os.sep) + os.sep
@@ -289,7 +263,11 @@ def main(argv: list[str] | None = None) -> None:
     mcp_bridges = []
     exempted = 0
     for pid, name, cmdline in matches:
-        if _is_pausable_gateway(cmdline) or _has_pausable_gateway_ancestor(pid):
+        # Only the gateway process itself is exempt.  A descendant can be
+        # orphaned by the graceful gateway drain before its launcher's tree
+        # kill; the updater's leftover guard cannot then identify it as
+        # pausable.  Reporting it here avoids a detached, silent failure.
+        if _is_pausable_gateway(cmdline):
             exempted += 1
             continue
         bridge = _live_mcp_bridge(pid, root)

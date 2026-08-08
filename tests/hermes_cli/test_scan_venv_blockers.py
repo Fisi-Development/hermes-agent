@@ -234,6 +234,20 @@ def test_main_desktop_serve_backend_still_blocks(monkeypatch, capsys):
     assert data["pausable_gateways"] == 0
 
 
+def test_main_keeps_gateway_owned_descendant_blocking(monkeypatch, capsys):
+    """A dead gateway worker can orphan this holder before its launcher dies.
+
+    Exempting by ancestry made the detached updater fail without a visible
+    Desktop error because the downstream guard only recognizes direct gateway
+    command lines.  Only direct gateway launchers are safe to defer.
+    """
+    descendant = (79, "python.exe", r"C:\\x\\venv\\Scripts\\python.exe -m some.child")
+    code, data = _run_main_with_detector(monkeypatch, capsys, [descendant])
+    assert code == 0
+    assert data["blocked"] is True
+    assert [proc["pid"] for proc in data["processes"]] == [79]
+
+
 def test_mcp_bridge_command_requires_the_exact_stdio_launch() -> None:
     assert _is_hermes_tools_mcp_command(
         ["python.exe", "-m", "agent.transports.hermes_tools_mcp_server"]

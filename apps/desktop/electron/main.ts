@@ -36,7 +36,11 @@ import { stopBackendChild as stopBackendChildImpl, stopBackendTreesForUpdate } f
 import { dashboardFallbackArgs, sourceDeclaresServe } from './backend-command'
 import { createBackendConnectionState } from './backend-connection-state'
 import { buildDesktopBackendEnv, hermesManagedNodePathEntries, normalizeHermesHomeRoot } from './backend-env'
-import { clearMcpBridgeQuiesceMarker, writeMcpBridgeQuiesceMarker } from './mcp-bridge-quiesce'
+import {
+  clearMcpBridgeQuiesceMarker,
+  isMcpBridgeQuiesceMarkerLive,
+  writeMcpBridgeQuiesceMarker
+} from './mcp-bridge-quiesce'
 import { isReauthRequiredError, waitForHermesReady } from './backend-health'
 import {
   canImportHermesCli,
@@ -3107,9 +3111,19 @@ async function applyUpdates(opts = {}) {
     // Keep the bridge-specific gate alive after this Electron process exits.
     // The staged updater is the new owner for the full mutation window; this
     // does not alter its shared update-marker contract.
-    if (mcpBridgeQuiesceOwned && Number.isInteger(child.pid)) {
-      if (!writeMcpBridgeQuiesceMarker(HERMES_HOME, child.pid)) {
+    if (mcpBridgeQuiesceOwned) {
+      if (!Number.isInteger(child.pid) || !writeMcpBridgeQuiesceMarker(HERMES_HOME, child.pid)) {
+        // Do not hand off an update that could outlive its bridge-respawn
+        // lease. The updater is our exact child, so terminate only that tree
+        // and keep Desktop alive to report the failure.
+        if (Number.isInteger(child.pid)) {
+          forceKillProcessTree(child.pid)
+        }
+        const message = 'Update aborted: Hermes could not transfer the Codex tool pause safely.'
         rememberLog('[updates] could not transfer Codex bridge quiesce marker to updater process')
+        emitUpdateProgress({ stage: 'error', message, percent: null })
+        startHermes().catch(() => {})
+        return { ok: false, error: 'mcp-bridge-quiesce-handoff-failed', message }
       }
     }
 
@@ -12054,11 +12068,11 @@ app.on('open-url', (event, url) => {
 })
 
 app.whenReady().then(() => {
-  // A successful updater releases its shared marker before relaunching us.
-  // Only then may Codex's Hermes-tools bridge start again; keeping the
-  // bridge-specific marker through the updater closes the whole mutation
-  // window, not just the first preflight scan.
-  if (!readLiveUpdateMarker(HERMES_HOME)) {
+  // A pre-#74782 staged updater does not have a shared-marker prewrite. Do
+  // not use that independent protocol to decide whether a bridge lease is
+  // stale: a relaunch can otherwise delete a live updater's quiesce marker.
+  // A stale marker self-heals in the stdio bridge and is cleaned here later.
+  if (!isMcpBridgeQuiesceMarkerLive(HERMES_HOME)) {
     clearMcpBridgeQuiesceMarker(HERMES_HOME)
   }
 

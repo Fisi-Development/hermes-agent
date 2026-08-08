@@ -10,6 +10,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 export const MCP_BRIDGE_QUIESCE_MARKER = '.hermes-venv-quiesce'
+const MAX_MARKER_AGE_MS = 20 * 60 * 1000
 
 export function mcpBridgeQuiesceMarkerPath(hermesHome: string): string {
   return path.join(hermesHome, MCP_BRIDGE_QUIESCE_MARKER)
@@ -41,5 +42,25 @@ export function clearMcpBridgeQuiesceMarker(hermesHome: string, ownerPid?: numbe
     fs.unlinkSync(marker)
   } catch {
     // Absent or not removable: the next normal startup/update will retry.
+  }
+}
+
+/** The marker's declared owner still has the short-lived update lease. */
+export function isMcpBridgeQuiesceMarkerLive(hermesHome: string, now = Date.now()): boolean {
+  try {
+    const [pidText, startedText] = fs.readFileSync(mcpBridgeQuiesceMarkerPath(hermesHome), 'utf8').split('\n')
+    const pid = Number.parseInt(pidText || '', 10)
+    const startedAt = Number.parseFloat(startedText || '') * 1000
+    if (!Number.isInteger(pid) || pid <= 0 || !Number.isFinite(startedAt) || now < startedAt || now - startedAt > MAX_MARKER_AGE_MS) {
+      return false
+    }
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch (error: any) {
+      return error?.code === 'EPERM'
+    }
+  } catch {
+    return false
   }
 }

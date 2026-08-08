@@ -119,10 +119,11 @@ class TestModuleSurface:
 class TestMain:
     def test_live_marker_requires_a_live_pid_and_fresh_timestamp(self, monkeypatch, tmp_path):
         import agent.transports.hermes_tools_mcp_server as m
+        import hermes_mcp_update_gate as update_gate
 
         marker = tmp_path / ".hermes-venv-quiesce"
         marker.write_text(f"123\n{int(time.time())}\n", encoding="utf-8")
-        monkeypatch.setattr(m, "_pid_alive", lambda pid: pid == 123)
+        monkeypatch.setattr(update_gate, "_pid_alive", lambda pid: pid == 123)
         assert _live_marker(marker) is True
 
         marker.write_text("123\n1\n", encoding="utf-8")
@@ -130,6 +131,16 @@ class TestMain:
 
         marker.write_text(f"456\n{int(time.time())}\n", encoding="utf-8")
         assert _live_marker(marker) is False
+
+    def test_shared_update_marker_alone_does_not_quiesce_a_bridge(self, monkeypatch, tmp_path):
+        """Only the explicit Desktop-consent marker may pause Codex tools."""
+        import agent.transports.hermes_tools_mcp_server as m
+
+        monkeypatch.setattr(m, "_update_quiesce_marker_path", lambda: tmp_path / ".hermes-venv-quiesce")
+        (tmp_path / ".hermes-update-in-progress").write_text(
+            f"123\n{int(time.time())}\n", encoding="utf-8"
+        )
+        assert m._update_quiesce_requested() is False
 
     def test_main_exits_before_building_server_when_update_quiesce_is_requested(self, monkeypatch):
         import agent.transports.hermes_tools_mcp_server as m

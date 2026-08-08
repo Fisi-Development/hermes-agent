@@ -7,6 +7,7 @@ import { describe, it } from 'vitest'
 
 import {
   clearMcpBridgeQuiesceMarker,
+  isMcpBridgeQuiesceMarkerLive,
   mcpBridgeQuiesceMarkerPath,
   writeMcpBridgeQuiesceMarker
 } from './mcp-bridge-quiesce'
@@ -25,6 +26,21 @@ describe('MCP bridge quiesce marker', () => {
 
       clearMcpBridgeQuiesceMarker(home, 101)
       assert.equal(fs.existsSync(marker), false)
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('does not treat a stale or dead owner as a live bridge pause', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-quiesce-'))
+    const marker = mcpBridgeQuiesceMarkerPath(home)
+
+    try {
+      fs.writeFileSync(marker, `999999\n${Math.floor(Date.now() / 1000)}\n`, 'utf8')
+      assert.equal(isMcpBridgeQuiesceMarkerLive(home), false)
+
+      fs.writeFileSync(marker, `1\n1\n`, 'utf8')
+      assert.equal(isMcpBridgeQuiesceMarkerLive(home), false)
     } finally {
       fs.rmSync(home, { recursive: true, force: true })
     }
