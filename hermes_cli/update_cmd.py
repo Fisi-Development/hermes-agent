@@ -2882,6 +2882,11 @@ def _detect_venv_python_processes(
         venv_prefix = str(venv_dir.resolve()).lower().rstrip(os.sep) + os.sep
     except OSError:
         venv_prefix = str(venv_dir).lower().rstrip(os.sep) + os.sep
+    managed_runtime_dir = project_root / ".hermes-runtime" / "python"
+    try:
+        managed_runtime_prefix = str(managed_runtime_dir.resolve()).lower().rstrip(os.sep) + os.sep
+    except OSError:
+        managed_runtime_prefix = str(managed_runtime_dir).lower().rstrip(os.sep) + os.sep
     try:
         root_prefix = str(project_root.resolve()).lower().rstrip(os.sep) + os.sep
     except OSError:
@@ -2919,9 +2924,11 @@ def _detect_venv_python_processes(
         cmdline_low = cmdline_raw.lower()
         cwd_low = str(info.get("cwd") or "").lower().rstrip(os.sep) + os.sep
 
-        # Primary match: the executable itself lives under this venv
-        # (venv\Scripts\python(w).exe — the desktop backend / gateway case).
-        is_holder = exe_norm.startswith(venv_prefix)
+        # Primary match: the executable is either the venv launcher or the
+        # isolated Python runtime it starts below this install.  The latter
+        # inherits the same native extension mappings but has no venv path in
+        # its argv (notably the stdio MCP bridge worker on Windows).
+        is_holder = exe_norm.startswith((venv_prefix, managed_runtime_prefix))
         # Fallback: uv/base-interpreter trampolines run a python whose exe is
         # OUTSIDE the venv but which still imports from it and holds its .pyd
         # files. Catch those by what they're running: a cmdline that references

@@ -86,6 +86,33 @@ def test_detect_venv_python_excludes_self_and_ancestors(_winp, tmp_path):
         assert cli_main._detect_venv_python_processes() == []
 
 
+@patch.object(cli_main, "_is_windows", return_value=True)
+def test_detect_venv_python_includes_only_this_install_managed_runtime(_winp, tmp_path):
+    root = tmp_path / "install"
+    managed_mcp = root / ".hermes-runtime" / "python" / "generation" / "python.exe"
+    managed_serve = root / ".hermes-runtime" / "python" / "generation" / "pythonw.exe"
+    managed_node = root / ".hermes-runtime" / "node" / "node.exe"
+    other_install = tmp_path / "other" / ".hermes-runtime" / "python" / "python.exe"
+    me = MagicMock()
+    me.parents.return_value = []
+    fake_psutil = types.SimpleNamespace(
+        process_iter=lambda attrs: iter(
+            [
+                _proc(700, str(managed_mcp), "python.exe", [str(managed_mcp), "-m", "agent.transports.hermes_tools_mcp_server"]),
+                _proc(701, str(managed_serve), "pythonw.exe", [str(managed_serve), "-m", "hermes_cli.main", "serve"]),
+                _proc(702, str(managed_node), "node.exe", [str(managed_node), "server.js"]),
+                _proc(703, str(other_install), "python.exe", [str(other_install), "-m", "agent.transports.hermes_tools_mcp_server"]),
+            ]
+        ),
+        Process=lambda *a, **k: me,
+    )
+
+    with patch.dict(sys.modules, {"psutil": fake_psutil}):
+        matches = cli_main._detect_venv_python_processes(root=root)
+
+    assert [pid for pid, _name, _cmdline in matches] == [700, 701]
+
+
 
 
 # ---------------------------------------------------------------------------
