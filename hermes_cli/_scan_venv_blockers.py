@@ -129,6 +129,21 @@ def _is_pausable_gateway(cmdline: str) -> bool:
     return looks_like_gateway_command_line(cmdline)
 
 
+def _live_pausable_gateway(pid: int, display_cmdline: str) -> bool:
+    """Classify a gateway from its complete live argv, never a display crop."""
+    try:
+        import psutil  # noqa: PLC0415
+
+        parts = [str(part) for part in psutil.Process(int(pid)).cmdline()]
+    except Exception:
+        # A vanished or unreadable process stays fail-closed unless the
+        # detector's original display string is already decisive.
+        return _is_pausable_gateway(display_cmdline)
+    if not parts:
+        return _is_pausable_gateway(display_cmdline)
+    return _is_pausable_gateway(" ".join(parts))
+
+
 def _venv_prefix(root: Path) -> str:
     try:
         return str((root / "venv").resolve()).lower().rstrip(os.sep) + os.sep
@@ -282,11 +297,12 @@ def main(argv: list[str] | None = None) -> None:
     mcp_bridges = []
     exempted = 0
     for pid, name, cmdline in matches:
-        # Only the gateway process itself is exempt.  A descendant can be
-        # orphaned by the graceful gateway drain before its launcher's tree
-        # kill; the updater's leftover guard cannot then identify it as
-        # pausable.  Reporting it here avoids a detached, silent failure.
-        if _is_pausable_gateway(cmdline):
+        # The upstream updater owns canonical gateway workers (including the
+        # managed-runtime child that writes the gateway PID).  Re-read the
+        # live argv because the detector intentionally truncates its display
+        # value, and a long runtime path can crop away ``gateway run``.
+        # Non-gateway descendants remain hard blockers.
+        if _live_pausable_gateway(pid, cmdline):
             exempted += 1
             continue
         bridge = _live_mcp_bridge(pid, root)

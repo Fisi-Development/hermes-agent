@@ -220,6 +220,23 @@ def test_main_exempts_gateway_chain_but_keeps_other_holders(monkeypatch, capsys)
     assert data["pausable_gateways"] == 2
 
 
+def test_main_rereads_truncated_runtime_gateway_argv(monkeypatch, capsys):
+    import hermes_cli._scan_venv_blockers as scan
+
+    cropped_runtime = (34, "python.exe", r"C:\target\.hermes-runtime\python\generation\cpython-3.11-windows-x86_64")
+    monkeypatch.setattr(
+        scan,
+        "_live_pausable_gateway",
+        lambda pid, _display_cmdline: pid == cropped_runtime[0],
+    )
+
+    code, data = _run_main_with_detector(monkeypatch, capsys, [cropped_runtime])
+
+    assert code == 0
+    assert data["blocked"] is False
+    assert data["pausable_gateways"] == 1
+
+
 def test_main_desktop_serve_backend_still_blocks(monkeypatch, capsys):
     """The desktop's own `serve` backend has no downstream pause — it must
     keep blocking exactly as before the exemption."""
