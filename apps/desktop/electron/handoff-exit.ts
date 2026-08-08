@@ -11,6 +11,7 @@ export const HANDOFF_EXIT_FALLBACK_MS = 5_000
 
 export interface HandoffExitDeps {
   exit: (code?: number) => void
+  onForcedExit?: () => void
   quit: () => void
   schedule?: (callback: () => void, delay: number) => { unref?: () => void }
 }
@@ -20,7 +21,10 @@ export function scheduleHandoffExit(deps: HandoffExitDeps, dwellMs: number): voi
 
   schedule(() => {
     deps.quit()
-    const fallback = schedule(() => deps.exit(0), HANDOFF_EXIT_FALLBACK_MS)
+    const fallback = schedule(() => {
+      deps.onForcedExit?.()
+      deps.exit(0)
+    }, HANDOFF_EXIT_FALLBACK_MS)
     fallback.unref?.()
   }, dwellMs)
 }

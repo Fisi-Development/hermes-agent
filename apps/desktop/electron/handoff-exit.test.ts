@@ -7,6 +7,7 @@ import { HANDOFF_EXIT_FALLBACK_MS, scheduleHandoffExit } from './handoff-exit'
 test('handoff exit requests a graceful quit before its bounded forced-exit fallback', () => {
   const timers: Array<{ callback: () => void; delay: number; unrefCalls: number }> = []
   let quitCalls = 0
+  let forcedExitCalls = 0
   const exits: number[] = []
 
   scheduleHandoffExit(
@@ -16,6 +17,9 @@ test('handoff exit requests a graceful quit before its bounded forced-exit fallb
       },
       exit: code => {
         exits.push(code ?? 0)
+      },
+      onForcedExit: () => {
+        forcedExitCalls += 1
       },
       schedule: (callback, delay) => {
         const timer = { callback, delay, unrefCalls: 0 }
@@ -35,5 +39,6 @@ test('handoff exit requests a graceful quit before its bounded forced-exit fallb
   assert.equal(timers[1].unrefCalls, 1)
 
   timers[1].callback()
+  assert.equal(forcedExitCalls, 1)
   assert.deepEqual(exits, [0])
 })

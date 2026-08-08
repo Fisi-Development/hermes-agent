@@ -3168,7 +3168,11 @@ async function applyUpdates(opts = {}) {
     isQuittingForHandoff = true
     mcpBridgeQuiesceHandedOff = mcpBridgeQuiesceOwned
     scheduleHandoffExit(
-      { quit: () => app.quit(), exit: code => app.exit(code) },
+      {
+        quit: () => app.quit(),
+        onForcedExit: () => rememberLog('[updates] graceful quit timed out; forcing handoff exit'),
+        exit: code => app.exit(code)
+      },
       UPDATE_HANDOFF_DWELL_MS
     )
 
