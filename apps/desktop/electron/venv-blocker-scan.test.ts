@@ -19,7 +19,8 @@ import {
   formatProbeFailedMessage,
   parseVenvBlockerScanOutput,
   resolveVenvPython,
-  scanVenvBlockers
+  scanVenvBlockers,
+  terminateMcpBridge
 } from './venv-blocker-scan'
 
 // ---------------------------------------------------------------------------
@@ -56,13 +57,14 @@ describe('formatBlockerMessage', () => {
   it('includes PID, name, cmdline, remote-client warning, and retry suggestion', () => {
     const msg = formatBlockerMessage({
       blocked: true,
-      processes: [{ pid: 101, name: 'python.exe', cmdline: 'serve --host 10.0.0.1' }]
+      processes: [{ pid: 101, name: 'python.exe', cmdline: 'serve --host 10.0.0.1' }],
+      mcpBridges: [],
+      pausableGateways: 0
     })
 
     assert.ok(msg.includes('PID 101'))
     assert.ok(msg.includes('python.exe'))
     assert.ok(msg.includes('serve'))
-    assert.ok(msg.includes('remote backend'))
     assert.ok(msg.includes('retry'))
     assert.ok(!msg.includes('force-venv'))
   })
@@ -97,6 +99,35 @@ describe('parseVenvBlockerScanOutput', () => {
     )
 
     assert.equal(o.kind, 'blocked')
+  })
+
+  it('surfaces MCP bridges separately while retaining the blocked state', () => {
+    const o = parseVenvBlockerScanOutput(
+      ok({
+        blocked: true,
+        mcp_bridges: [{ pid: 2, name: 'python.exe', cmdline: 'bridge', created_at: 123.5 }],
+        pausable_gateways: 3
+      })
+    )
+    assert.equal(o.kind, 'blocked')
+    if (o.kind === 'blocked') {
+      assert.equal(o.result.processes.length, 0)
+      assert.equal(o.result.mcpBridges[0].createdAt, 123.5)
+      assert.equal(o.result.pausableGateways, 3)
+    }
+  })
+
+  it('rejects a PID classified as both a normal blocker and MCP bridge', () => {
+    assert.equal(
+      parseVenvBlockerScanOutput(
+        ok({
+          blocked: true,
+          processes: [{ pid: 1, name: 'p', cmdline: 'c' }],
+          mcp_bridges: [{ pid: 1, name: 'p', cmdline: 'c', created_at: 1 }]
+        })
+      ).kind,
+      'probe-failure'
+    )
   })
 
   it('malformed JSON', () => {
@@ -152,6 +183,7 @@ describe('parseVenvBlockerScanOutput', () => {
 // ---------------------------------------------------------------------------
 
 describe('scanVenvBlockers', () => {
+  const existingRoot = fs.realpathSync.native(process.cwd())
   const stubVenv = () => '/fake/venv/python.exe'
   const okJson = JSON.stringify({ ok: true, blocked: false, processes: [] })
 
@@ -175,25 +207,25 @@ describe('scanVenvBlockers', () => {
   }
 
   it('clear scan returns clear', async () => {
-    assert.equal((await scanVenvBlockers('/r', execReturn(okJson), stubVenv)).kind, 'clear')
+    assert.equal((await scanVenvBlockers(existingRoot, execReturn(okJson), stubVenv)).kind, 'clear')
   })
 
   it('blocked scan returns blocked', async () => {
-    assert.equal((await scanVenvBlockers('/r', execReturn(blockedJson), stubVenv)).kind, 'blocked')
+    assert.equal((await scanVenvBlockers(existingRoot, execReturn(blockedJson), stubVenv)).kind, 'blocked')
   })
 
   it('non-zero exit is probe-failure', async () => {
-    const o = await scanVenvBlockers('/r', execThrow(2, 'ModuleNotFoundError'), stubVenv)
+    const o = await scanVenvBlockers(existingRoot, execThrow(2, 'ModuleNotFoundError'), stubVenv)
     assert.equal(o.kind, 'probe-failure')
   })
 
   it('missing venv python is probe-failure', async () => {
-    const o = await scanVenvBlockers('/r', execReturn(okJson), () => null)
+    const o = await scanVenvBlockers(existingRoot, execReturn(okJson), () => null)
     assert.equal(o.kind, 'probe-failure')
   })
 
   it('malformed subprocess output is probe-failure', async () => {
-    const o = await scanVenvBlockers('/r', execReturn('bad json'), stubVenv)
+    const o = await scanVenvBlockers(existingRoot, execReturn('bad json'), stubVenv)
     assert.equal(o.kind, 'probe-failure')
   })
 
@@ -206,13 +238,49 @@ describe('scanVenvBlockers', () => {
       return { stdout: okJson, stderr: '' }
     }) as any
 
-    await scanVenvBlockers('/update/root', spy, stubVenv)
+    await scanVenvBlockers(existingRoot, spy, stubVenv)
     assert.equal(calls.length, 1)
     const c = calls[0]
     assert.ok(c.cmd.endsWith('python.exe'))
-    assert.deepEqual(c.args, ['-m', 'hermes_cli._scan_venv_blockers'])
-    assert.equal(c.cwd, '/update/root')
+    assert.deepEqual(c.args, ['-m', 'hermes_cli._scan_venv_blockers', '--root', existingRoot])
+    assert.equal(c.cwd, existingRoot)
     assert.equal(typeof c.timeout, 'number')
     assert.ok(c.timeout > 0)
+  })
+
+  it('removes inherited PYTHONPATH before scanning the target install', async () => {
+    const calls: any[] = []
+    const spy = (async (_cmd: string, _args: string[], opts: any) => {
+      calls.push(opts)
+      return { stdout: okJson, stderr: '' }
+    }) as any
+
+    await scanVenvBlockers(existingRoot, spy, stubVenv)
+    assert.equal(Object.hasOwn(calls[0].env, 'PYTHONPATH'), false)
+  })
+
+  it('terminates only when the Python re-verification reports the same bridge alive', async () => {
+    const calls: any[] = []
+    const spy = (async (_cmd: string, args: string[]) => {
+      calls.push(args)
+      return { stdout: JSON.stringify({ ok: true, terminated: true }), stderr: '' }
+    }) as any
+    const stopped = await terminateMcpBridge(
+      existingRoot,
+      { pid: 44, name: 'python.exe', cmdline: 'bridge', createdAt: 123.5 },
+      spy,
+      stubVenv
+    )
+    assert.equal(stopped, true)
+    assert.deepEqual(calls[0], [
+      '-m',
+      'hermes_cli._scan_venv_blockers',
+      '--root',
+      existingRoot,
+      '--terminate-mcp-bridge',
+      '44',
+      '--created-at',
+      '123.5'
+    ])
   })
 })

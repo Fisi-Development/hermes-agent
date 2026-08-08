@@ -49,9 +49,21 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Optional
+import threading
+import time
+from pathlib import Path
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+# Desktop writes this short-lived marker only after the user explicitly agrees
+# to interrupt Codex's Hermes-tool calls for an in-place update. It is separate
+# from the updater's shared ownership marker: the bridge must quiesce before
+# the staged updater can take over that marker.
+_UPDATE_QUIESCE_MARKER = ".hermes-venv-quiesce"
+_UPDATE_MARKER = ".hermes-update-in-progress"
+_UPDATE_MARKER_MAX_AGE_SECONDS = 20 * 60
+_QUIESCE_POLL_SECONDS = 1.0
 
 # JSON Schema type -> Python type mapping for signature generation
 _JSON_TO_PY = {
@@ -62,6 +74,80 @@ _JSON_TO_PY = {
     "array": list,
     "object": dict,
 }
+
+
+def _update_quiesce_marker_path() -> Path:
+    """Return the process-level bridge-quiesce marker path."""
+    try:
+        from hermes_constants import get_process_hermes_home
+
+        return get_process_hermes_home() / _UPDATE_QUIESCE_MARKER
+    except Exception:
+        home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
+        return Path(home) / _UPDATE_QUIESCE_MARKER
+
+
+def _pid_alive(pid: int) -> bool:
+    """Check marker ownership without importing venv-backed Hermes modules."""
+    if pid <= 0:
+        return False
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
+
+    try:
+        import ctypes
+
+        process = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        if not process:
+            # Access denied is a live foreign owner for update-safety purposes.
+            return ctypes.get_last_error() == 5
+        try:
+            exit_code = ctypes.c_ulong()
+            if not ctypes.windll.kernel32.GetExitCodeProcess(process, ctypes.byref(exit_code)):
+                return True
+            return exit_code.value == 259  # STILL_ACTIVE
+        finally:
+            ctypes.windll.kernel32.CloseHandle(process)
+    except Exception:
+        return False
+
+
+def _live_marker(path: Path) -> bool:
+    """Read the shared marker format with a dead-PID and age self-heal."""
+    try:
+        pid_line, started_line, *_ = path.read_text(encoding="utf-8").splitlines()
+        pid = int(pid_line.strip())
+        age = time.time() - float(started_line.strip())
+    except (OSError, ValueError):
+        return False
+    return 0 <= age <= _UPDATE_MARKER_MAX_AGE_SECONDS and _pid_alive(pid)
+
+
+def _update_quiesce_requested() -> bool:
+    """Whether a live update or Desktop quiesce gate owns this bridge's venv."""
+    home = _update_quiesce_marker_path().parent
+    return _live_marker(home / _UPDATE_MARKER) or _live_marker(_update_quiesce_marker_path())
+
+
+def _watch_for_update_quiesce(
+    stop_event: threading.Event,
+    *,
+    requested: Callable[[], bool] = _update_quiesce_requested,
+    exit_process: Callable[[int], None] = os._exit,
+    poll_seconds: float = _QUIESCE_POLL_SECONDS,
+) -> None:
+    """Exit promptly when an update asks this stdio bridge to quiesce."""
+    while not stop_event.wait(poll_seconds):
+        if requested():
+            exit_process(0)
 
 
 def _signature_from_schema(schema: dict | None) -> tuple[inspect.Signature, dict[str, type]]:
@@ -261,11 +347,26 @@ def main(argv: Optional[list[str]] = None) -> int:
     os.environ.setdefault("HERMES_QUIET", "1")
     os.environ.setdefault("HERMES_REDACT_SECRETS", "true")
 
+    # Do this before importing/building the MCP server: an update has already
+    # received explicit consent to interrupt the bridge, and starting imports
+    # from the mutable venv would reintroduce the Windows file lock.
+    if _update_quiesce_requested():
+        logger.info("Hermes update is quiescing Codex tool bridges; exiting")
+        return 0
+
     try:
         server = _build_server()
     except ImportError as exc:
         sys.stderr.write(f"hermes-tools MCP server cannot start: {exc}\n")
         return 2
+
+    stop_quiesce_watch = threading.Event()
+    threading.Thread(
+        target=_watch_for_update_quiesce,
+        args=(stop_quiesce_watch,),
+        name="hermes-tools-update-quiesce",
+        daemon=True,
+    ).start()
 
     # FastMCP runs with stdio transport by default when launched as a
     # subprocess.
@@ -277,6 +378,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         logger.exception("hermes-tools MCP server crashed")
         sys.stderr.write(f"hermes-tools MCP server error: {exc}\n")
         return 1
+    finally:
+        stop_quiesce_watch.set()
     return 0
 
 

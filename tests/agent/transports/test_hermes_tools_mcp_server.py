@@ -9,9 +9,13 @@ build helper assembles a server when the SDK is present.
 from __future__ import annotations
 
 import inspect
+import threading
+import time
 from typing import get_args
 
 from agent.transports.hermes_tools_mcp_server import (
+    _live_marker,
+    _watch_for_update_quiesce,
     _signature_from_schema,
 )
 
@@ -113,6 +117,46 @@ class TestModuleSurface:
 
 
 class TestMain:
+    def test_live_marker_requires_a_live_pid_and_fresh_timestamp(self, monkeypatch, tmp_path):
+        import agent.transports.hermes_tools_mcp_server as m
+
+        marker = tmp_path / ".hermes-venv-quiesce"
+        marker.write_text(f"123\n{int(time.time())}\n", encoding="utf-8")
+        monkeypatch.setattr(m, "_pid_alive", lambda pid: pid == 123)
+        assert _live_marker(marker) is True
+
+        marker.write_text("123\n1\n", encoding="utf-8")
+        assert _live_marker(marker) is False
+
+        marker.write_text(f"456\n{int(time.time())}\n", encoding="utf-8")
+        assert _live_marker(marker) is False
+
+    def test_main_exits_before_building_server_when_update_quiesce_is_requested(self, monkeypatch):
+        import agent.transports.hermes_tools_mcp_server as m
+
+        monkeypatch.setattr(m, "_update_quiesce_requested", lambda: True)
+        monkeypatch.setattr(m, "_build_server", lambda: (_ for _ in ()).throw(AssertionError("must not build")))
+
+        assert m.main([]) == 0
+
+    def test_quiesce_watcher_exits_when_marker_appears(self):
+        stop = threading.Event()
+        checks = iter([False, True])
+        exits = []
+
+        def exit_process(code):
+            exits.append(code)
+            stop.set()
+
+        _watch_for_update_quiesce(
+            stop,
+            requested=lambda: next(checks),
+            exit_process=exit_process,
+            poll_seconds=0.001,
+        )
+
+        assert exits == [0]
+
     def test_main_returns_2_when_mcp_unavailable(self, monkeypatch):
         """When the mcp package isn't installed, main() should exit
         cleanly with code 2 and an install hint, not crash."""
