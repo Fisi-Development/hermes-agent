@@ -3,10 +3,11 @@
  *
  * ``app.quit()`` is the preferred graceful path, but a quit listener or a
  * native modal can keep Electron resident after the handoff child starts. The
- * child then waits forever for the very PID that launched it. Arm a small
- * forced-exit fallback only after requesting the normal quit.
+ * child then waits forever for the very PID that launched it. Arm a bounded
+ * forced-exit fallback only after requesting the normal quit. The window
+ * intentionally exceeds the SSH quit teardown budget in main.ts.
  */
-export const HANDOFF_EXIT_FALLBACK_MS = 1_000
+export const HANDOFF_EXIT_FALLBACK_MS = 5_000
 
 export interface HandoffExitDeps {
   exit: (code?: number) => void

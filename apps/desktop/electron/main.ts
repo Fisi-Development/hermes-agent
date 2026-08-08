@@ -12241,6 +12241,7 @@ app.on('before-quit', event => {
       sshQuitTeardownDone = true
       app.quit()
     })
+    return
   }
 
   // Clean quit mid-boot should not trip next-launch --no-sandbox (#38216).

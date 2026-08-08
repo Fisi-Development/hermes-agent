@@ -31,6 +31,7 @@ test('handoff exit requests a graceful quit before its bounded forced-exit fallb
   assert.equal(quitCalls, 1)
   assert.deepEqual(exits, [])
   assert.equal(timers[1].delay, HANDOFF_EXIT_FALLBACK_MS)
+  assert.ok(HANDOFF_EXIT_FALLBACK_MS > 4_000)
   assert.equal(timers[1].unrefCalls, 1)
 
   timers[1].callback()
