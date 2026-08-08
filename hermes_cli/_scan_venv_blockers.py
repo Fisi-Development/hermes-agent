@@ -136,6 +136,25 @@ def _venv_prefix(root: Path) -> str:
         return str(root / "venv").lower().rstrip(os.sep) + os.sep
 
 
+def _is_owned_mcp_bridge_executable(exe_norm: str, root: Path) -> bool:
+    """Return whether an executable is one of this install's MCP runtimes.
+
+    On Windows, the managed venv launcher starts an isolated Python runtime
+    below ``.hermes-runtime/python``.  Both processes carry the exact bridge
+    command and either can retain native venv files during an update.  Do not
+    trust the whole install tree: only these two interpreter roots belong to
+    the bridge launch contract.
+    """
+    try:
+        runtime_prefix = (
+            str((root / ".hermes-runtime" / "python").resolve()).lower().rstrip(os.sep)
+            + os.sep
+        )
+    except OSError:
+        runtime_prefix = str(root / ".hermes-runtime" / "python").lower().rstrip(os.sep) + os.sep
+    return exe_norm.startswith((_venv_prefix(root), runtime_prefix))
+
+
 def _is_hermes_tools_mcp_command(parts: list[str]) -> bool:
     """Return True only for the migration's argument-free stdio MCP launch."""
     try:
@@ -173,7 +192,7 @@ def _live_mcp_bridge_process(pid: int, root: Path):
         exe_norm = str(Path(exe).resolve()).lower()
     except (OSError, ValueError):
         exe_norm = str(exe).lower()
-    if not exe_norm.startswith(_venv_prefix(root)) or not _is_hermes_tools_mcp_command(parts):
+    if not _is_owned_mcp_bridge_executable(exe_norm, root) or not _is_hermes_tools_mcp_command(parts):
         return None
     return proc, {
         "pid": int(pid),

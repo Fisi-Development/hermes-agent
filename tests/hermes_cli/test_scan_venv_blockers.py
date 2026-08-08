@@ -19,6 +19,7 @@ import pytest
 import agent.redact as redact_module
 from hermes_cli._scan_venv_blockers import (
     _is_hermes_tools_mcp_command,
+    _is_owned_mcp_bridge_executable,
     _is_pausable_gateway,
     _redact_sensitive_cmdline,
     main,
@@ -258,6 +259,19 @@ def test_mcp_bridge_command_requires_the_exact_stdio_launch() -> None:
     assert not _is_hermes_tools_mcp_command(
         ["python.exe", "-m", "agent.transports.codex_app_server"]
     )
+
+
+def test_mcp_bridge_accepts_only_the_venv_and_managed_runtime_interpreters(tmp_path: Path) -> None:
+    root = tmp_path / "install"
+    venv_python = root / "venv" / "Scripts" / "python.exe"
+    managed_runtime = root / ".hermes-runtime" / "python" / "generation" / "python.exe"
+    unrelated_runtime = root / ".hermes-runtime" / "node" / "node.exe"
+    other_install_runtime = tmp_path / "other-install" / ".hermes-runtime" / "python" / "python.exe"
+
+    assert _is_owned_mcp_bridge_executable(str(venv_python).lower(), root)
+    assert _is_owned_mcp_bridge_executable(str(managed_runtime).lower(), root)
+    assert not _is_owned_mcp_bridge_executable(str(unrelated_runtime).lower(), root)
+    assert not _is_owned_mcp_bridge_executable(str(other_install_runtime).lower(), root)
 
 
 def test_main_reports_mcp_bridge_as_a_blocker_for_explicit_desktop_consent(monkeypatch, capsys):
