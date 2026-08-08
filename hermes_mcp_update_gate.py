@@ -62,14 +62,24 @@ def _pid_alive(pid: int) -> bool:
 
 def marker_path(hermes_home: str | Path | None = None) -> Path:
     """Return the bridge-specific marker without importing Hermes code."""
-    home = hermes_home or os.environ.get("HERMES_HOME") or (Path.home() / ".hermes")
-    return Path(home) / _MARKER_NAME
+    if hermes_home is None:
+        hermes_home = os.environ.get("HERMES_HOME")
+    if hermes_home is None:
+        # Keep this stdlib bootstrap aligned with get_process_hermes_home():
+        # Desktop's Windows marker lives under LOCALAPPDATA, not ~/.hermes.
+        hermes_home = (
+            Path(os.environ["LOCALAPPDATA"]) / "hermes"
+            if os.name == "nt" and os.environ.get("LOCALAPPDATA")
+            else Path.home() / ".hermes"
+        )
+    return Path(hermes_home) / _MARKER_NAME
 
 
-def live_quiesce_marker(hermes_home: str | Path | None = None) -> bool:
+def live_quiesce_marker(marker: str | Path | None = None) -> bool:
     """Return True for a fresh marker whose declared owner is still live."""
     try:
-        pid_line, started_line, *_ = marker_path(hermes_home).read_text(encoding="utf-8").splitlines()
+        path = marker_path() if marker is None else Path(marker)
+        pid_line, started_line, *_ = path.read_text(encoding="utf-8").splitlines()
         pid = int(pid_line.strip())
         age = time.time() - float(started_line.strip())
     except (OSError, ValueError):
@@ -79,5 +89,12 @@ def live_quiesce_marker(hermes_home: str | Path | None = None) -> bool:
 
 def should_quiesce_mcp_bridge() -> bool:
     """True only while executing the legacy MCP module under a live gate."""
-    main_spec = getattr(sys.modules.get("__main__"), "__spec__", None)
-    return getattr(main_spec, "name", None) == _MCP_MAIN_MODULE and live_quiesce_marker()
+    # ``runpy`` imports the parent package before it installs the target
+    # module's __spec__ in __main__, so __main__.__spec__ is still None at the
+    # only point where this gate can protect jiter_preload. orig_argv retains
+    # the original ``-m <module>`` pair throughout that bootstrap.
+    argv = getattr(sys, "orig_argv", sys.argv)
+    return any(
+        token == "-m" and index + 1 < len(argv) and argv[index + 1] == _MCP_MAIN_MODULE
+        for index, token in enumerate(argv)
+    ) and live_quiesce_marker()

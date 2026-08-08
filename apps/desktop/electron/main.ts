@@ -12072,9 +12072,15 @@ app.whenReady().then(() => {
   // not use that independent protocol to decide whether a bridge lease is
   // stale: a relaunch can otherwise delete a live updater's quiesce marker.
   // A stale marker self-heals in the stdio bridge and is cleaned here later.
-  if (!isMcpBridgeQuiesceMarkerLive(HERMES_HOME)) {
-    clearMcpBridgeQuiesceMarker(HERMES_HOME)
+  const clearQuiesceMarkerWhenUpdaterExits = () => {
+    if (!isMcpBridgeQuiesceMarkerLive(HERMES_HOME)) {
+      clearMcpBridgeQuiesceMarker(HERMES_HOME)
+      return
+    }
+    const retry = setTimeout(clearQuiesceMarkerWhenUpdaterExits, 1000)
+    retry.unref()
   }
+  clearQuiesceMarkerWhenUpdaterExits()
 
   const systemCa = installWindowsSystemCaTrust(tls)
 

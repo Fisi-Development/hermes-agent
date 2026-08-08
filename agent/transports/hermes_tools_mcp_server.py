@@ -95,7 +95,7 @@ def _live_marker(path: Path) -> bool:
     """Read the bridge marker format with a dead-PID and age self-heal."""
     from hermes_mcp_update_gate import live_quiesce_marker
 
-    return live_quiesce_marker(path.parent)
+    return live_quiesce_marker(path)
 
 
 def _update_quiesce_requested() -> bool:

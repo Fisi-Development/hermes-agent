@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sys
 import time
-import types
 import os
 import subprocess
 from pathlib import Path
@@ -16,10 +15,10 @@ def test_live_marker_accepts_only_a_fresh_live_owner(monkeypatch, tmp_path):
     marker = tmp_path / ".hermes-venv-quiesce"
     marker.write_text(f"123\n{int(time.time())}\n", encoding="utf-8")
     monkeypatch.setattr(gate, "_pid_alive", lambda pid: pid == 123)
-    assert gate.live_quiesce_marker(tmp_path) is True
+    assert gate.live_quiesce_marker(marker) is True
 
     marker.write_text("123\n1\n", encoding="utf-8")
-    assert gate.live_quiesce_marker(tmp_path) is False
+    assert gate.live_quiesce_marker(marker) is False
 
 
 def test_legacy_module_is_gated_before_agent_import(monkeypatch, tmp_path):
@@ -27,11 +26,7 @@ def test_legacy_module_is_gated_before_agent_import(monkeypatch, tmp_path):
     marker.write_text(f"123\n{int(time.time())}\n", encoding="utf-8")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setattr(gate, "_pid_alive", lambda pid: pid == 123)
-    monkeypatch.setitem(
-        sys.modules,
-        "__main__",
-        types.SimpleNamespace(__spec__=types.SimpleNamespace(name="agent.transports.hermes_tools_mcp_server")),
-    )
+    monkeypatch.setattr(sys, "orig_argv", [sys.executable, "-m", "agent.transports.hermes_tools_mcp_server"])
 
     assert gate.should_quiesce_mcp_bridge() is True
 
@@ -43,7 +38,7 @@ def test_legacy_module_exits_cleanly_under_a_live_quiesce_marker(tmp_path):
     )
     env = {**os.environ, "HERMES_HOME": str(tmp_path)}
     result = subprocess.run(
-        [sys.executable, "-m", "agent.transports.hermes_tools_mcp_server"],
+        [sys.executable, "-X", "importtime", "-m", "agent.transports.hermes_tools_mcp_server"],
         cwd=Path(__file__).parents[1],
         env=env,
         capture_output=True,
@@ -52,4 +47,4 @@ def test_legacy_module_exits_cleanly_under_a_live_quiesce_marker(tmp_path):
         check=False,
     )
     assert result.returncode == 0
-    assert result.stderr == ""
+    assert "jiter.jiter" not in result.stderr
