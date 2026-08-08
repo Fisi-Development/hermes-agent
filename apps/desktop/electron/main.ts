@@ -209,6 +209,7 @@ import {
   sandboxFallbackFromEnv,
   sandboxPreflight
 } from './update-relaunch'
+import { scheduleHandoffExit } from './handoff-exit'
 import { isOfficialSshRemote, OFFICIAL_REPO_HTTPS_URL } from './update-remote'
 import {
   resolveStagedUpdaterBinary,
@@ -3166,9 +3167,10 @@ async function applyUpdates(opts = {}) {
     // and lured users into the #50238 relaunch loop.)
     isQuittingForHandoff = true
     mcpBridgeQuiesceHandedOff = mcpBridgeQuiesceOwned
-    setTimeout(() => {
-      app.quit()
-    }, UPDATE_HANDOFF_DWELL_MS)
+    scheduleHandoffExit(
+      { quit: () => app.quit(), exit: code => app.exit(code) },
+      UPDATE_HANDOFF_DWELL_MS
+    )
 
     return { ok: true, handedOff: true, updater }
   } finally {
