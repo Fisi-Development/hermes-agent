@@ -312,6 +312,35 @@ def test_main_reports_mcp_bridge_as_a_blocker_for_explicit_desktop_consent(monke
     ]
 
 
+def test_main_reports_both_sides_of_the_mcp_trampoline_for_consent(monkeypatch, capsys):
+    import hermes_cli._scan_venv_blockers as scan
+
+    launcher = (90, "python.exe", r"C:\target\venv\Scripts\python.exe -m agent.transports.hermes_tools_mcp_server")
+    worker = (
+        91,
+        "python.exe",
+        r"C:\target\.hermes-runtime\python\generation\python.exe -m agent.transports.hermes_tools_mcp_server",
+    )
+    monkeypatch.setattr(
+        scan,
+        "_live_mcp_bridge",
+        lambda pid, _root: {
+            "pid": pid,
+            "name": "python.exe",
+            "cmdline": launcher[2] if pid == launcher[0] else worker[2],
+            "created_at": 123.5,
+        }
+        if pid in {launcher[0], worker[0]}
+        else None,
+    )
+
+    code, data = _run_main_with_detector(monkeypatch, capsys, [launcher, worker])
+
+    assert code == 0
+    assert data["processes"] == []
+    assert [bridge["pid"] for bridge in data["mcp_bridges"]] == [90, 91]
+
+
 def test_main_keeps_mixed_mcp_and_unknown_holders_blocking(monkeypatch, capsys):
     import hermes_cli._scan_venv_blockers as scan
 
