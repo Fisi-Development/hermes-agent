@@ -2569,7 +2569,14 @@ async function checkUpdates() {
     }
   }
 
-  const fetched = await runGit(['fetch', '--quiet', 'origin', branch], { cwd: updateRoot })
+  // `git fetch origin <branch>` may update only FETCH_HEAD. The checks below
+  // read origin/<branch>, so refresh that exact tracking ref explicitly; a
+  // force-pushed fork otherwise looks current and the UI never offers the
+  // update that the staged updater should install.
+  const fetched = await runGit(
+    ['fetch', '--quiet', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
+    { cwd: updateRoot }
+  )
 
   if (fetched.code !== 0) {
     return {
