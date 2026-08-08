@@ -572,6 +572,8 @@ class TestCmdUpdateCheckBranchFlag:
         commands = [" ".join(str(a) for a in c.args[0]) for c in mock_run.call_args_list]
         # Non-main branch skips upstream probe entirely.
         assert not any("fetch" in c and "upstream" in c for c in commands), commands
+        fetch_cmds = [c for c in commands if "fetch" in c and "origin" in c]
+        assert any("+refs/heads/bb/gui:refs/remotes/origin/bb/gui" in c for c in fetch_cmds), fetch_cmds
         # Verify and rev-list both target origin/bb/gui.
         verify_cmds = [c for c in commands if "rev-parse" in c and "--verify" in c]
         assert any("origin/bb/gui" in c for c in verify_cmds), verify_cmds

@@ -2264,7 +2264,10 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
         if has_upstream_remote:
             print("→ Fetching from upstream...")
             fetch_result = subprocess.run(
-                git_cmd + ["fetch"] + depth_args + ["upstream", branch],
+                git_cmd + ["fetch"] + depth_args + [
+                    "upstream",
+                    f"+refs/heads/{branch}:refs/remotes/upstream/{branch}",
+                ],
                 cwd=_m().PROJECT_ROOT,
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
@@ -2276,7 +2279,10 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
             # No upstream remote, or the upstream fetch failed — use origin.
             print("→ Fetching from origin...")
             fetch_result = subprocess.run(
-                git_cmd + ["fetch"] + depth_args + ["origin", branch],
+                git_cmd + ["fetch"] + depth_args + [
+                    "origin",
+                    f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+                ],
                 cwd=_m().PROJECT_ROOT,
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
@@ -2287,7 +2293,10 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
         # Non-default branch: compare against origin/<branch> directly.
         print("→ Fetching from origin...")
         fetch_result = subprocess.run(
-            git_cmd + ["fetch"] + depth_args + ["origin", branch],
+            git_cmd + ["fetch"] + depth_args + [
+                "origin",
+                f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+            ],
             cwd=_m().PROJECT_ROOT,
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
@@ -3750,8 +3759,17 @@ def _cmd_update_impl(args, gateway_mode: bool):
         branch = _m()._resolve_update_branch(args)
 
         print("→ Fetching updates...")
+        # An explicit branch argument only updates FETCH_HEAD on some Git
+        # versions/configurations.  The rest of this path deliberately reads
+        # origin/<branch>, so map the fetched head there explicitly; otherwise
+        # a force-pushed fork can report success after resetting to a stale
+        # tracking ref (the packaged Windows updater reproduced this exactly).
         fetch_result = subprocess.run(
-            git_cmd + ["fetch", "origin", branch],
+            git_cmd + [
+                "fetch",
+                "origin",
+                f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+            ],
             cwd=_m().PROJECT_ROOT,
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
