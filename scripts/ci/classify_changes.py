@@ -19,7 +19,8 @@ Lanes:
 * ``scan``        — supply-chain scan (Python files, .pth, setup hooks).
 * ``deps``        — pyproject.toml dependency bounds check.
 * ``npm_lock``    — semantic package-lock.json diff PR comment.
-* ``installer``   — PowerShell installer tests (Windows runner).
+* ``installer``   — PowerShell installer and Desktop updater tests (Windows
+  runner).
 * ``mcp_catalog`` — bundled MCP catalog / installer review.
 
 Docker is not a lane — it builds on push-to-main and release only,
@@ -69,10 +70,18 @@ _SCAN_FILES = {"setup.cfg", "pyproject.toml"}
 _MCP_CATALOG_PATHS = ("optional-mcps/",)
 _MCP_CATALOG_FILES = {"hermes_cli/mcp_catalog.py"}
 
-# Windows installer + its PowerShell tests. These only run on a Windows runner,
-# so they get their own lane rather than riding along with ``python``.
+# Windows installer + its PowerShell tests, plus the Desktop updater handoff.
+# These only get their real platform coverage on a Windows runner, so they get
+# their own lane rather than riding along with ``python`` / ``frontend``.
 _INSTALLER_PATHS = ("scripts/tests/",)
-_INSTALLER_FILES = {"scripts/install.ps1", "scripts/install.cmd"}
+_INSTALLER_FILES = {
+    "apps/desktop/electron/updater-process.test.ts",
+    "apps/desktop/electron/updater-process.ts",
+    "scripts/desktop-update.ps1",
+    "scripts/install.cmd",
+    "scripts/install.ps1",
+}
+_INSTALLER_PREFIXES = ("apps/desktop/electron/handoff-",)
 
 def _is_docs(p: str) -> bool:
     if p.startswith(("skills/", "optional-skills/")):
@@ -105,7 +114,11 @@ def _is_mcp_catalog(p: str) -> bool:
 
 
 def _is_installer(p: str) -> bool:
-    return p.startswith(_INSTALLER_PATHS) or p in _INSTALLER_FILES
+    return (
+        p.startswith(_INSTALLER_PATHS)
+        or p.startswith(_INSTALLER_PREFIXES)
+        or p in _INSTALLER_FILES
+    )
 
 
 def _is_ci_review(p: str) -> bool:
