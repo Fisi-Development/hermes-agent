@@ -15,6 +15,7 @@ import {
   resolvePosixScriptHandoff,
   resolveStagedUpdaterBinary,
   resolveUpdateScriptHandoff,
+  resolveWindowsDevRelaunchAppPath,
   resolveWindowsUpdateTransport,
   sandboxFallbackFromEnv,
   spawnUpdaterProcess,
@@ -23,6 +24,15 @@ import {
   terminateSpawnedUpdaterIfExact,
   wrapHandoffForDetachedConsole
 } from './updater-process'
+
+test('resolveWindowsDevRelaunchAppPath keeps only a genuine dev app entry', () => {
+  assert.equal(
+    resolveWindowsDevRelaunchAppPath(true, ['electron.exe', 'C:\\repo\\apps\\desktop']),
+    path.resolve('C:\\repo\\apps\\desktop')
+  )
+  assert.equal(resolveWindowsDevRelaunchAppPath(true, ['electron.exe', '--inspect=9229']), undefined)
+  assert.equal(resolveWindowsDevRelaunchAppPath(false, ['Hermes.exe', 'C:\\repo\\apps\\desktop']), undefined)
+})
 
 test('resolveStagedUpdaterBinary returns the staged updater on Windows without guessing its generation', () => {
   assert.equal(

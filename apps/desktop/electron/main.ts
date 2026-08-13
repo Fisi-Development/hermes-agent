@@ -180,7 +180,6 @@ import {
 import { runNativeLogin } from './native-oauth-login'
 import { loadNativeTokenSet, type NativeTokenStoreIo, persistNativeTokenSet } from './native-token-store'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
-import { configureWindowsTaskbarDetails, WINDOWS_APP_USER_MODEL_ID } from './windows-taskbar-details'
 import {
   cancelPoolBackendStart,
   deletePoolBackendEntryIfCurrent,
@@ -240,6 +239,7 @@ import {
   launchWindowsUpdateTransport,
   resolvePosixScriptHandoff,
   resolveStagedUpdaterBinary,
+  resolveWindowsDevRelaunchAppPath,
   resolveWindowsUpdateTransport,
   sandboxFallbackFromEnv,
   spawnUpdaterProcess,
@@ -289,6 +289,11 @@ import {
   writeSandboxMarker
 } from './windows-sandbox-fallback'
 import { installWindowsSystemCaTrust } from './windows-system-ca'
+import {
+  buildWindowsRelaunchCommand,
+  configureWindowsTaskbarDetails,
+  resolveWindowsAppUserModelId
+} from './windows-taskbar-details'
 import { readWindowsUserEnvVar } from './windows-user-env'
 import { isPackagedInstallPath as isPackagedInstallPathUnderRoots } from './workspace-cwd'
 import { readWslWindowsClipboardImage } from './wsl-clipboard-image'
@@ -713,6 +718,7 @@ const BOOT_FAKE_STEP_MS = (() => {
 })()
 
 const APP_NAME = process.env.HERMES_DESKTOP_APP_NAME || 'Hermes'
+const WINDOWS_RUNTIME_APP_USER_MODEL_ID = resolveWindowsAppUserModelId(process.defaultApp)
 const HUD_WINDOW_TITLE = `${APP_NAME} HUD`
 const TITLEBAR_HEIGHT = 34
 const MACOS_TRAFFIC_LIGHTS_HEIGHT = 14
@@ -1015,13 +1021,13 @@ app.setName(APP_NAME)
 
 // Windows toast notifications silently no-op unless an AppUserModelID is set:
 // `new Notification().show()` returns without error and nothing appears. The
-// AUMID must match the installed Start Menu shortcut's AUMID, which
-// electron-builder derives from the build `appId` (com.nousresearch.hermes) —
-// keep this string in sync with package.json `build.appId`. macOS/Linux don't
-// need this, so gate it on Windows. (Fixes: desktop approval/turn notifications
-// never firing on Windows.)
+// Packaged Hermes must use the same AUMID as its Start Menu shortcut. An
+// unpackaged `electron .` run uses an isolated development identity, so a
+// stale Electron shortcut can never take over the production Hermes taskbar
+// group. macOS/Linux don't need an AUMID. (Fixes: desktop approval/turn
+// notifications never firing on Windows.)
 if (IS_WINDOWS) {
-  app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID)
+  app.setAppUserModelId(WINDOWS_RUNTIME_APP_USER_MODEL_ID)
 }
 
 // Seed the native About panel with the live Hermes version. This is refreshed
@@ -5497,12 +5503,49 @@ function getAppIconPath() {
 
 function configureTaskbarDetails(win, icon = getAppIconPath()) {
   configureWindowsTaskbarDetails(win, {
-    appId: WINDOWS_APP_USER_MODEL_ID,
+    appId: WINDOWS_RUNTIME_APP_USER_MODEL_ID,
     iconPath: icon,
     isWindows: IS_WINDOWS,
-    relaunchCommand: `"${process.execPath}"`,
+    relaunchCommand: buildWindowsRelaunchCommand({
+      executablePath: process.execPath,
+      appEntryPath: resolveWindowsDevRelaunchAppPath(process.defaultApp, process.argv),
+      isDefaultApp: process.defaultApp
+    }),
     relaunchDisplayName: APP_NAME
   })
+}
+
+function repairPackagedWindowsShortcutsAfterLaunch() {
+  // The updater PowerShell process is already loaded before it pulls this
+  // helper. Run the same repair from the newly built/relaunched Hermes process
+  // so the first update that delivers it repairs an older Electron shortcut.
+  if (!IS_WINDOWS || !app.isPackaged) {
+    return
+  }
+
+  const installRoot = path.resolve(process.resourcesPath, '..', '..', '..', '..', '..')
+  const helper = path.join(installRoot, 'scripts', 'windows-desktop-shortcuts.ps1')
+
+  if (!fs.existsSync(helper)) {
+    rememberLog(`[windows-shortcut] helper missing: ${helper}`)
+
+    return
+  }
+
+  try {
+    const child = spawn(
+      windowsPowerShellPath(),
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', helper, '-Repair', '-RepairTargetExe', process.execPath],
+      hiddenWindowsChildOptions({ stdio: 'ignore' })
+    )
+
+    child.once('error', error => rememberLog(`[windows-shortcut] repair launch failed: ${error.message}`))
+
+    child.unref()
+  } catch (error) {
+
+    rememberLog(`[windows-shortcut] repair launch failed: ${error.message}`)
+  }
 }
 
 function sendOpenUpdatesRequested() {
@@ -12721,6 +12764,7 @@ app.whenReady().then(async () => {
   }
 
   installMediaPermissions()
+  repairPackagedWindowsShortcutsAfterLaunch()
   registerMediaProtocol()
   installEmbedReferer()
   registerDeepLinkProtocol()

@@ -264,6 +264,21 @@ export function wrapHandoffForDetachedConsole(
   }
 }
 
+/** Dev Electron starts `electron.exe <app-entry>`; preserve that entry for a
+ * taskbar relaunch. Packaged Hermes.exe takes no app argument. */
+export function resolveWindowsDevRelaunchAppPath(
+  defaultApp: boolean,
+  argv: readonly string[]
+): string | undefined {
+  const appEntry = argv[1]
+
+  if (!defaultApp || !appEntry || appEntry.startsWith('-')) {
+    return undefined
+  }
+
+  return path.resolve(appEntry)
+}
+
 /** Render argv for a PowerShell-facing manual instruction without creating
  * executable source from unquoted values. Single quotes are literal in
  * PowerShell; an embedded quote is represented by two single quotes. */
