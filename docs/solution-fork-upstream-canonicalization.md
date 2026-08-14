@@ -37,15 +37,15 @@ Use four explicit boundaries:
 repository: royalaid/hermes-agent
 integration_branch: fork-integration
 upstream_repository: NousResearch/hermes-agent
-upstream_main_sha: 423f92e607dd51908d23b04758bc0fcd6ec5ff39
+upstream_main_sha: 7a9634568cdeb8f5363bc99042a24ebff9df0e1c
 fork_main_sha: a8c50eb1d841563eff22bd707d80472e7f1e9c9f
-integration_base_sha: 423f92e607dd51908d23b04758bc0fcd6ec5ff39
-integration_code_head_sha: 1d337bffceaeb7091a62c0255dcb5c98faf7cb4b
-published_input_sha: 7d094ca310a6601271b8846ed291030cee2e3d6a
-reconstructed_replay_head_sha: ba65ac08b396e5f268c2435bc086ab09e14ca35f
+integration_base_sha: 7a9634568cdeb8f5363bc99042a24ebff9df0e1c
+integration_code_head_sha: e58ae2ed0e90f67236921808a434fbc97719b8ee
+published_input_sha: 1a6875a5c7683710cafeab653148272882db14d3
+reconstructed_replay_head_sha: e58ae2ed0e90f67236921808a434fbc97719b8ee
 upstream_pr: https://github.com/NousResearch/hermes-agent/pull/84778
 upstream_pr_head_sha: 45213d7f718ab4e32f0b4b6274a75a004e7604bd
-status: rebuilt_pending_release_verification
+status: rebuilt_verified_pending_publish
 ```
 
 The fork's ordinary `main` is not the current upstream tip. The published
@@ -101,6 +101,34 @@ excluded_stale_pre_rebuild:
   - f94cb5280  # feat(gateway): armed diagnostics ring (U3b)
 ```
 
+## 2026-08-14 composer-viewport corrective rebuild
+
+The desktop dropped-frames lineage was corrected after the pane-containment
+change exposed a layout contract that the earlier test suite did not cover.
+The repair was committed on the existing feature lineage, merged into the
+exact published integration input, and replayed with merge topology onto the
+current upstream tip.
+
+```yaml
+published_input_sha: 1a6875a5c7683710cafeab653148272882db14d3
+safety_ref: safety/fork-integration-before-composer-rebuild-20260814-0015
+source_branch: fix/desktop-dropped-frames
+source_head_sha: 364ec0167c20483f6b8c0962cb932308e72592f2
+pre_rebase_merge_sha: 10de66ff318c1b4dc5351b0adb193382f3048650
+rebased_feature_sha: b47e98d0d2c4958e486c832bdef2dfde92d76f65
+integration_code_head_sha: e58ae2ed0e90f67236921808a434fbc97719b8ee
+upstream_main_sha: 7a9634568cdeb8f5363bc99042a24ebff9df0e1c
+verified_merge_base_sha: 7a9634568cdeb8f5363bc99042a24ebff9df0e1c
+range_diff: "91 of 91 fork commits patch-equivalent; no conflicts or drops"
+status: rebuilt_verified_pending_publish
+tests:
+  - "apps/desktop typecheck: passed"
+  - "apps/desktop targeted ESLint (src/app/chat/index.tsx): passed"
+  - "apps/desktop focused pane Vitest: 12 passed"
+  - "apps/desktop build: passed; build stamp e58ae2ed0e90"
+  - "apps/desktop Electron cold-resume composer viewport E2E: passed"
+```
+
 ## Integrated local fix record
 
 The following fork-local fix was integrated from a clean worktree based on the
@@ -110,13 +138,15 @@ published `fork-integration` tip:
 - component: desktop-dropped-frames
   source_worktree: C:\Users\gwmai\git\hermes-agent\.worktrees\fix-desktop-dropped-frames
   source_branch: fix/desktop-dropped-frames
-  source_head_sha: 4118ab25b3ab9977b731fee99702dc2f29780016
-  integration_sha: 1d337bffceaeb7091a62c0255dcb5c98faf7cb4b
+  source_head_sha: 364ec0167c20483f6b8c0962cb932308e72592f2
+  integration_sha: e58ae2ed0e90f67236921808a434fbc97719b8ee
   status: integrated
-  behavior: hidden-pane contain-intrinsic-size permanent + content-visibility toggle; reveal catch-up as a transition; ordered text|tool queue on one timer; flush-time sessionInterrupted re-check; terminal/approval events flush-then-apply
+  behavior: hidden-pane contain-intrinsic-size permanent + content-visibility toggle; reveal catch-up as a transition; ordered text|tool queue on one timer; flush-time sessionInterrupted re-check; terminal/approval events flush-then-apply; chat surface pinned to the pane viewport so a long transcript cannot displace the composer
   tests:
-    - "apps/desktop typecheck: passed"
-    - "apps/desktop test:ui: 3895 passed; expected journal defect + 3 known load-flaky files (passed in isolation)"
+    - "apps/desktop typecheck: passed at e58ae2ed0e90"
+    - "apps/desktop build: passed at e58ae2ed0e90"
+    - "apps/desktop focused pane Vitest: 12 passed"
+    - "apps/desktop Electron cold-resume composer viewport E2E: passed"
   open_item: "R2 scroll retention still needs a real-browser/electron e2e check on a deep scrolled-up transcript"
 - component: desktop-session-history-pane
   source_worktree: C:\Users\gwmai\AppData\Local\hermes\worktrees\fix-session-history-pane
