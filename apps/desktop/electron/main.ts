@@ -3066,18 +3066,19 @@ async function applyUpdates(opts = {}) {
     // Detached so the updater outlives this process — it needs us GONE before
     // `hermes update` will run (the venv shim is locked while we live).
     //
-    // Prefer the repo-owned hand-off script over the staged Tauri binary.
-    // The staged binary is frozen (no self-update path) and historically runs
-    // months-stale updater logic — pre-#67369 cache resolver, pre-#74782
-    // marker adoption — producing failures that were fixed on main long ago
-    // (2026-08-09 incident). scripts/desktop-update/windows.ps1 ships WITH the
-    // checkout, so each `hermes update` refreshes the code that drives the
-    // next one. Checkouts that predate the script fall back to the binary
-    // path unchanged.
+    // Prefer the staged Tauri installer over the repo-owned hand-off script.
+    // The installer is the update surface users can actually see: the branded
+    // setup window with per-step progress and live output
+    // (apps/bootstrap-installer, `Hermes-Setup.exe --update` — the same
+    // hand-off contract upstream main wires below). The force-drain preflight
+    // above has already cleared every proven blocker, so the installer starts
+    // against a quiet venv; pre-#74782 staged binaries keep the marker
+    // pre-write skip that lets them acquire their own claim. CLI installs
+    // that never staged an installer keep the script hand-off.
     const scriptHandoff = resolveUpdateScriptHandoff(updateRoot)
     let child
 
-    if (scriptHandoff) {
+    if (scriptHandoff && !updater) {
       // A bare detached+hidden powershell spawn silently dies before -File
       // processing (console-subsystem init failure — see
       // wrapHandoffForDetachedConsole). Route through `cmd start` so the
