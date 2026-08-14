@@ -3312,14 +3312,17 @@ async function applyUpdatesTransaction(opts = {}) {
     // Detached so the updater outlives this process — it needs us GONE before
     // `hermes update` will run (the venv shim is locked while we live).
     //
-    // Prefer the repo-owned hand-off script over the staged Tauri binary.
-    // The staged binary is frozen (no self-update path) and historically runs
-    // months-stale updater logic — pre-#67369 cache resolver, pre-#74782
-    // marker adoption — producing failures that were fixed on main long ago
-    // (2026-08-09 incident). scripts/desktop-update.ps1 ships WITH the
-    // checkout, so each `hermes update` refreshes the code that drives the
-    // next one. Checkouts that predate the script fall back to the binary
-    // path unchanged.
+    // Prefer the staged Tauri installer over the repo-owned hand-off script.
+    // The installer is the update surface users can actually see: the branded
+    // setup window with per-step progress and live output
+    // (apps/bootstrap-installer, `Hermes-Setup.exe --update` — the same
+    // hand-off contract upstream main wires in applyUpdates). The script's
+    // WinForms shim replaced it while the staged binary was frozen and
+    // months-stale; this branch's lease protocol closes that hole without
+    // giving up the UI: a stale binary that cannot adopt the bridge lease is
+    // terminated by exact PID+start-time and the update aborts fail-closed
+    // (a skipped update is recoverable, a half-updated venv is not). CLI
+    // installs that never staged an installer keep the script hand-off.
     const scriptHandoff = resolveUpdateScriptHandoff(updateRoot)
     let child
 
@@ -3345,7 +3348,7 @@ async function applyUpdatesTransaction(opts = {}) {
 
     bridgeLease = handoffLease
 
-    if (scriptHandoff) {
+    if (scriptHandoff && !updater) {
       // A bare detached+hidden powershell spawn silently dies before -File
       // processing (console-subsystem init failure — see
       // wrapHandoffForDetachedConsole). Route through `cmd start` so the
