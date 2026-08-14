@@ -8,6 +8,7 @@ import {
   collectRelaunchArgs,
   MARKER_SELF_ADOPT_EPOCH_MS,
   resolvePosixScriptHandoff,
+  selectWindowsUpdateHandoff,
   resolveStagedUpdaterBinary,
   resolveUpdateScriptHandoff,
   sandboxFallbackFromEnv,
@@ -215,6 +216,33 @@ test('resolveUpdateScriptHandoff is Windows-only (POSIX updates in place)', () =
   })
 
   assert.equal(handoff, null)
+})
+
+test('selectWindowsUpdateHandoff prefers the staged installer when both handoffs exist', () => {
+  const scriptHandoff = {
+    command: 'powershell',
+    args: ['-File', String.raw`C:\Hermes\scripts\desktop-update\windows.ps1`],
+    scriptPath: String.raw`C:\Hermes\scripts\desktop-update\windows.ps1`
+  }
+
+  assert.deepEqual(selectWindowsUpdateHandoff(String.raw`C:\Hermes\hermes-setup.exe`, scriptHandoff), {
+    kind: 'staged-installer',
+    updater: String.raw`C:\Hermes\hermes-setup.exe`
+  })
+})
+
+test('selectWindowsUpdateHandoff keeps the repo script as the no-installer fallback', () => {
+  const scriptHandoff = {
+    command: 'powershell',
+    args: ['-File', String.raw`C:\Hermes\scripts\desktop-update\windows.ps1`],
+    scriptPath: String.raw`C:\Hermes\scripts\desktop-update\windows.ps1`
+  }
+
+  assert.deepEqual(selectWindowsUpdateHandoff(null, scriptHandoff), {
+    kind: 'repo-script',
+    handoff: scriptHandoff
+  })
+  assert.equal(selectWindowsUpdateHandoff(null, null), null)
 })
 
 test('wrapHandoffForDetachedConsole routes through cmd start with own console', () => {

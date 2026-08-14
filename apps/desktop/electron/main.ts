@@ -212,11 +212,13 @@ import { isOfficialSshRemote, OFFICIAL_REPO_HTTPS_URL } from './update-remote'
 import {
   collectRelaunchArgs,
   resolvePosixScriptHandoff,
+  selectWindowsUpdateHandoff,
   resolveStagedUpdaterBinary,
   resolveUpdateScriptHandoff,
   sandboxFallbackFromEnv,
   spawnUpdaterProcess,
   stagedUpdaterSupportsPrewrittenMarker,
+  type UpdateScriptHandoff,
   wrapHandoffForDetachedConsole
 } from './updater-process'
 import { formatBlockerMessage, formatProbeFailedMessage, scanVenvBlockers } from './venv-blocker-scan'
@@ -2919,6 +2921,8 @@ async function applyUpdates(opts = {}) {
       return await applyUpdatesPosixHandoff(opts)
     }
 
+    let windowsScriptHandoff: UpdateScriptHandoff | null = null
+
     if (!updater) {
       // No staged updater binary — this is a CLI-installed user (they ran
       // `hermes desktop`, never the Tauri installer that self-copies
@@ -2928,8 +2932,9 @@ async function applyUpdates(opts = {}) {
       // when the script exists. Only when the checkout predates the script do
       // we surface the manual one-liner.
       const updateRoot = resolveUpdateRoot()
+      windowsScriptHandoff = resolveUpdateScriptHandoff(updateRoot)
 
-      if (!resolveUpdateScriptHandoff(updateRoot)) {
+      if (!windowsScriptHandoff) {
         // They DO have a working `hermes` on PATH / in the venv, so the
         // correct path is the one-liner in their native medium. We show the
         // EXACT command, branch-pinned to the checkout they're on — bare
@@ -3075,10 +3080,12 @@ async function applyUpdates(opts = {}) {
     // against a quiet venv; pre-#74782 staged binaries keep the marker
     // pre-write skip that lets them acquire their own claim. CLI installs
     // that never staged an installer keep the script hand-off.
-    const scriptHandoff = resolveUpdateScriptHandoff(updateRoot)
+    const updateHandoff = selectWindowsUpdateHandoff(updater, windowsScriptHandoff)
     let child
 
-    if (scriptHandoff && !updater) {
+    if (updateHandoff?.kind === 'repo-script') {
+      const scriptHandoff = updateHandoff.handoff
+
       // A bare detached+hidden powershell spawn silently dies before -File
       // processing (console-subsystem init failure — see
       // wrapHandoffForDetachedConsole). Route through `cmd start` so the
@@ -3122,8 +3129,10 @@ async function applyUpdates(opts = {}) {
       rememberLog(
         `[updates] launched repo hand-off script: ${scriptHandoff.scriptPath} (branch ${branch}); exiting desktop to release venv shim`
       )
-    } else {
-      child = spawnUpdaterProcess(updater, updaterArgs, {
+    } else if (updateHandoff?.kind === 'staged-installer') {
+      const selectedUpdater = updateHandoff.updater
+
+      child = spawnUpdaterProcess(selectedUpdater, updaterArgs, {
         cwd: HERMES_HOME,
         env: {
           ...process.env,
@@ -3149,17 +3158,19 @@ async function applyUpdates(opts = {}) {
       // binary is the one being refused. Losing the anti-respawn hardening is
       // strictly better than never updating again, and the updater still writes
       // its own marker moments later.
-      if (Number.isInteger(child.pid) && stagedUpdaterSupportsPrewrittenMarker(updater)) {
+      if (Number.isInteger(child.pid) && stagedUpdaterSupportsPrewrittenMarker(selectedUpdater)) {
         writeUpdateMarker(HERMES_HOME, child.pid)
       } else if (Number.isInteger(child.pid)) {
         rememberLog(
-          `[updates] skipping marker pre-write: staged updater predates self-adopt (${updater}); it would refuse its own claim`
+          `[updates] skipping marker pre-write: staged updater predates self-adopt (${selectedUpdater}); it would refuse its own claim`
         )
       }
 
       rememberLog(
-        `[updates] launched updater: ${updater} ${updaterArgs.join(' ')}; exiting desktop to release venv shim`
+        `[updates] launched updater: ${selectedUpdater} ${updaterArgs.join(' ')}; exiting desktop to release venv shim`
       )
+    } else {
+      throw new Error('No Windows update hand-off is available.')
     }
 
     // Linger on the "updating — don't reopen" overlay long enough for the user
