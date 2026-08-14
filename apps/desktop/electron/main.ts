@@ -213,8 +213,8 @@ import { isOfficialSshRemote, OFFICIAL_REPO_HTTPS_URL } from './update-remote'
 import {
   collectRelaunchArgs,
   resolvePosixScriptHandoff,
-  selectWindowsUpdateHandoff,
   resolveStagedUpdaterBinary,
+  selectWindowsUpdateHandoff,
   resolveUpdateScriptHandoff,
   sandboxFallbackFromEnv,
   spawnUpdaterProcess,
