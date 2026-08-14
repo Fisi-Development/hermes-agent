@@ -9,9 +9,9 @@ import {
   MARKER_SELF_ADOPT_EPOCH_MS,
   resolvePosixScriptHandoff,
   resolveStagedUpdaterBinary,
-  selectWindowsUpdateHandoff,
   resolveUpdateScriptHandoff,
   sandboxFallbackFromEnv,
+  selectWindowsUpdateHandoff,
   spawnUpdaterProcess,
   stagedUpdaterSupportsPrewrittenMarker,
   wrapHandoffForDetachedConsole
