@@ -233,6 +233,12 @@ const SCROLL_GUTTER = '[scrollbar-gutter:stable]'
 // A non-session group's scroll body: own scroller when tall, flattened when compact.
 const GROUP_BODY = cn(SCROLL_Y, COMPACT_FLAT)
 
+// The session stack itself must not scroll at normal window heights: section
+// headers, navigation, and the profile rail stay anchored while their own
+// bodies scroll. On a compact window, flatten those bodies into one reachable
+// stack instead of letting flex items overlap.
+const COMPACT_STACK_SCROLL = 'compact:overflow-y-auto compact:overflow-x-hidden compact:overscroll-contain'
+
 // Section-header action icons stay hidden until the whole header row is hovered
 // (group/section lives on SidebarSectionHeader), mirroring the artifacts/file
 // browser header affordances. focus-visible keeps them keyboard-reachable.
@@ -1514,7 +1520,13 @@ export function ChatSidebar({
         )}
 
         {showSessionSections && (
-          <div className={cn('flex min-h-0 flex-1 flex-col pb-1.75', SCROLL_Y, SCROLL_GUTTER)}>
+          <div
+            className={cn(
+              'flex min-h-0 flex-1 flex-col overflow-hidden pb-1.75',
+              COMPACT_STACK_SCROLL,
+              SCROLL_GUTTER
+            )}
+          >
             {trimmedQuery && (
               <SidebarSessionsSection
                 activeSessionId={activeSidebarSessionId}
@@ -1546,7 +1558,7 @@ export function ChatSidebar({
             {!trimmedQuery && (
               <SidebarSessionsSection
                 activeSessionId={activeSidebarSessionId}
-                contentClassName="flex flex-col gap-px rounded-lg pb-2 pt-1"
+                contentClassName={cn('flex max-h-56 flex-col gap-px rounded-lg pb-2 pt-1', GROUP_BODY)}
                 dndSensors={dndSensors}
                 emptyState={<SidebarPinnedEmptyState />}
                 label={s.pinned}
