@@ -237,6 +237,7 @@ import { UpdateInFlightTransaction, waitForLocalBackendClearance } from './updat
 import { readLiveUpdateMarker, updateHandoffConflict, writeUpdateMarker } from './update-marker'
 import { runWindowsForceDrainPreflight, type ForceDrainOutcome } from './update-preflight'
 import { isOfficialSshRemote, resolveUpdateRemote } from './update-remote'
+import { acquireTauriBridgeLease, STAGED_UPDATER_BRIDGE_LEASE_ENV } from './tauri-bridge-lease'
 import {
   collectRelaunchArgs,
   resolveWindowsDevRelaunchAppPath,
@@ -3335,12 +3336,24 @@ async function applyWindowsCanonicalHandoff() {
       `[updates] launched repo hand-off script: ${scriptHandoff.scriptPath} (branch ${branch}); exiting desktop to release venv shim`
     )
   } else {
+    const bridgeLease = acquireTauriBridgeLease(HERMES_HOME, updateRoot)
+
+    if (!bridgeLease) {
+      const message = 'Update aborted: Hermes could not create the protected Tauri updater handoff.'
+      rememberLog('[updates] staged updater hand-off refused: bridge lease unavailable')
+      emitUpdateProgress({ stage: 'error', message, percent: null })
+      startHermes().catch(() => {})
+
+      return { ok: false, error: 'bridge-lease-unavailable', message }
+    }
+
     child = spawnUpdaterProcess(updater, updaterArgs, {
       cwd: HERMES_HOME,
       env: {
         ...process.env,
         HERMES_HOME,
-        PATH: pathWithHermesManagedNode(venvBin)
+        PATH: pathWithHermesManagedNode(venvBin),
+        [STAGED_UPDATER_BRIDGE_LEASE_ENV]: bridgeLease.leaseId
       },
       detached: true,
       stdio: 'ignore'
