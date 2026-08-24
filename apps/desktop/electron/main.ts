@@ -6320,7 +6320,7 @@ function repairPackagedWindowsShortcutsAfterLaunch() {
 
   try {
     const child = spawn(
-      windowsPowerShellPath(),
+      'powershell.exe',
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', helper, '-Repair', '-RepairTargetExe', process.execPath],
       hiddenWindowsChildOptions({ stdio: 'ignore' })
     )
