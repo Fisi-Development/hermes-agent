@@ -596,6 +596,58 @@ class TestReasoningDeltasFiredFlag(unittest.TestCase):
 
         self.assertEqual(captured, ["Let me merge the PR."])
 
+    def test_native_codex_summary_entries_keep_separate_reasoning_ids(self):
+        agent = self._make_agent()
+        structured = []
+        agent.reasoning_event_callback = lambda phase, item_id, text="": structured.append((phase, item_id, text))
+        msg = SimpleNamespace(
+            content="Done.", tool_calls=None,
+            reasoning_content="Inspecting\nChecking\n\nVerifying",
+            reasoning=None, reasoning_details=None,
+            codex_reasoning_items=[
+                {"type": "reasoning", "id": "rs_live", "summary": [
+                    {"type": "summary_text", "text": "Inspecting"},
+                    {"type": "summary_text", "text": "Checking"},
+                ]},
+                {"type": "reasoning", "id": "rs_verify", "summary": [
+                    {"type": "summary_text", "text": "Verifying"}
+                ]},
+            ],
+        )
+        agent._build_assistant_message(msg, "stop")
+        self.assertEqual(structured, [
+            ("start", "rs_live:summary:0", ""), ("delta", "rs_live:summary:0", "Inspecting"), ("end", "rs_live:summary:0", ""),
+            ("start", "rs_live:summary:1", ""), ("delta", "rs_live:summary:1", "Checking"), ("end", "rs_live:summary:1", ""),
+            ("start", "rs_verify:summary:0", ""), ("delta", "rs_verify:summary:0", "Verifying"), ("end", "rs_verify:summary:0", ""),
+        ])
+
+    def test_native_codex_summary_requires_the_whole_sidecar_to_be_valid(self):
+        agent = self._make_agent()
+        structured = []
+        fallback = []
+        agent.reasoning_event_callback = lambda phase, item_id, text="": structured.append((phase, item_id, text))
+        agent.reasoning_callback = fallback.append
+        msg = SimpleNamespace(
+            content="Done.", tool_calls=None,
+            reasoning_content="Safe summary",
+            reasoning=None, reasoning_details=None,
+            codex_reasoning_items=[{
+                "type": "reasoning", "id": "rs_safe",
+                "summary": [{"type": "summary_text", "text": "Safe summary"}],
+            }],
+            # A malformed sibling makes the combined persisted sidecar
+            # ineligible for source-aware display as one all-or-nothing unit.
+            codex_message_items=[{
+                "type": "message", "id": "unsafe", "role": "assistant",
+                "phase": "commentary", "content": "not-a-list",
+            }],
+        )
+
+        agent._build_assistant_message(msg, "stop")
+
+        self.assertEqual(structured, [])
+        self.assertEqual(fallback, ["Safe summary"])
+
 
 class TestReasoningShownThisTurnFlag(unittest.TestCase):
     """Post-response reasoning display should be suppressed when reasoning
