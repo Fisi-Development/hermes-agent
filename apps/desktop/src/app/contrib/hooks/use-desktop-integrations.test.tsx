@@ -7,7 +7,13 @@ import { $confirmRequest, runConfirm, settleConfirm } from '@/store/confirm'
 import { $hubInstalledOverride } from '@/store/hub-actions'
 import { requestMcpInstallFromDeepLink } from '@/store/mcp-deeplink-install'
 import { $pluginInstallRequest } from '@/store/plugin-install-request'
-import { _resetLegacyDiscardForTests } from '@/store/session'
+import {
+  $sessionResumeRequest,
+  _resetLegacyDiscardForTests,
+  setRememberedRoute,
+  setRememberedSessionId,
+  setRememberedSessionOwner
+} from '@/store/session'
 import { dropSessionState, publishSessionState } from '@/store/session-states'
 import type * as WindowsStore from '@/store/windows'
 import type { SessionInfo } from '@/types/hermes'
@@ -53,6 +59,7 @@ describe('useDesktopIntegrations', () => {
   beforeEach(() => {
     window.localStorage.clear()
     _resetLegacyDiscardForTests()
+    $sessionResumeRequest.set(null)
     vi.mocked(requestMcpInstallFromDeepLink).mockClear()
     navigate = vi.fn()
     // Every test starts as a main window; only the HUD describe flips this.
@@ -158,6 +165,24 @@ describe('useDesktopIntegrations', () => {
       render({ profileReady: true, sessions })
 
       expect(navigate).toHaveBeenCalledWith('/remembered-session', { replace: true })
+    })
+
+    it('restores duplicate ids through the exact owner last claimed by main', () => {
+      const ownerRoute = { connectionId: 'source-b', profile: 'default' }
+      setRememberedRoute('/shared-id', 'default')
+      setRememberedSessionId('shared-id', 'default')
+      setRememberedSessionOwner('shared-id', ownerRoute, 'default')
+
+      render({
+        profileReady: true,
+        sessions: [
+          session({ connection_id: 'source-a', id: 'shared-id', profile: 'default' }),
+          session({ connection_id: 'source-b', id: 'shared-id', profile: 'default' })
+        ]
+      })
+
+      expect($sessionResumeRequest.get()).toMatchObject({ ownerRoute, sessionId: 'shared-id' })
+      expect(navigate).toHaveBeenCalledWith('/shared-id', { replace: true })
     })
 
     it('restores remembered session id when no remembered route exists', () => {
@@ -596,7 +621,11 @@ describe('useDesktopIntegrations', () => {
       deepLink({ kind: 'plugin', name: 'install', params })
 
       expect($pluginInstallRequest.get()).toMatchObject({
-        repo: params.repo, catalogName: params.catalog_name, sha: params.sha, enable: true, force: false
+        repo: params.repo,
+        catalogName: params.catalog_name,
+        sha: params.sha,
+        enable: true,
+        force: false
       })
       expect(navigate).not.toHaveBeenCalled()
     })
@@ -620,7 +649,11 @@ describe('useDesktopIntegrations', () => {
       const identifier = 'skills-sh/owner/repo/skill'
       const payload = { kind: 'skill', name: 'install', params: { identifier } }
 
-      for (const [connection, profile] of [['server-a', 'research'], ['server-b', 'work'], ['server-a', 'research']]) {
+      for (const [connection, profile] of [
+        ['server-a', 'research'],
+        ['server-b', 'work'],
+        ['server-a', 'research']
+      ]) {
         setApiRequestConnection(connection)
         setApiRequestProfile(profile)
         api.mockClear()
@@ -640,11 +673,21 @@ describe('useDesktopIntegrations', () => {
         expect($confirmRequest.get()?.phase).toBe('done')
         settleConfirm(true)
         await waitFor(() => expect($hubInstalledOverride.get()[identifier]).toBe(true))
-        expect(installs()).toEqual([[{
-          connectionId: connection, profile, path: '/api/skills/hub/install', method: 'POST', body: { identifier }
-        }]])
+        expect(installs()).toEqual([
+          [
+            {
+              connectionId: connection,
+              profile,
+              path: '/api/skills/hub/install',
+              method: 'POST',
+              body: { identifier }
+            }
+          ]
+        ])
         expect(api).toHaveBeenCalledWith({
-          connectionId: connection, profile, path: '/api/actions/skill-link-test/status?lines=200'
+          connectionId: connection,
+          profile,
+          path: '/api/actions/skill-link-test/status?lines=200'
         })
       }
 
