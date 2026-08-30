@@ -12,9 +12,9 @@ const createdAt = new Date('2026-08-03T00:00:00.000Z')
 const [hydratedMessage] = toChatMessages([
   {
     role: 'assistant',
-    content: 'Fixture complete.',
+    content: '',
     reasoning:
-      'Analyzing Pi core cut selection algorithm\nClarifying cut point handling in tool results\n\nExamining payload rewrite excluding pre-compaction kept window\nVerifying serializer handling of compacted data',
+      'Analyzing Pi core cut selection algorithm\nClarifying cut point handling in tool results\n\nExamining payload rewrite excluding pre-compaction kept window\nVerifying serializer handling of compacted data\n\nI’m checking the persisted turn now.',
     codex_reasoning_items: [
       {
         type: 'reasoning',
@@ -31,6 +31,14 @@ const [hydratedMessage] = toChatMessages([
           { type: 'summary_text', text: 'Examining payload rewrite excluding pre-compaction kept window' },
           { type: 'summary_text', text: 'Verifying serializer handling of compacted data' }
         ]
+      }
+    ],
+    codex_message_items: [
+      {
+        type: 'message',
+        role: 'assistant',
+        phase: 'commentary',
+        content: [{ type: 'output_text', text: 'I’m checking the persisted turn now.' }]
       }
     ],
     timestamp: createdAt.getTime()
@@ -52,9 +60,33 @@ const message = {
   }
 } as ThreadMessage
 
+const densityControlMessage = {
+  id: 'reasoning-layout-density-control',
+  role: 'assistant',
+  content: [
+    {
+      type: 'reasoning',
+      text: 'Thought density paragraph one.\n\nThought density paragraph two.\n\nThought density paragraph three.'
+    },
+    {
+      type: 'text',
+      text: 'Ordinary prose paragraph one.\n\nOrdinary prose paragraph two.\n\nOrdinary prose paragraph three.'
+    }
+  ],
+  status: { type: 'complete', reason: 'stop' },
+  createdAt,
+  metadata: {
+    unstable_state: null,
+    unstable_annotations: [],
+    unstable_data: [],
+    steps: [],
+    custom: {}
+  }
+} as ThreadMessage
+
 function ReasoningLayoutHarness() {
   const runtime = useExternalStoreRuntime<ThreadMessage>({
-    messages: [message],
+    messages: [message, densityControlMessage],
     isRunning: false,
     onNew: async () => {}
   })

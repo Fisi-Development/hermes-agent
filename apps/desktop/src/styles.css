@@ -1293,6 +1293,13 @@ body.guest-pointer-lock :is(webview, iframe) {
   margin-block: var(--paragraph-gap) 0;
 }
 
+/* Blank-line-separated reasoning paragraphs should keep the same compact pitch
+   as adjacent native summary rows; ordinary assistant prose retains the global
+   paragraph rhythm above. */
+[data-slot='aui_thinking-disclosure'] .aui-md :where(p + p) {
+  margin-top: 0;
+}
+
 /* Headings are section breaks, so they own a larger top gap than prose — a
    leading `# title` (common in re-entered/delegated turns) no longer butts
    against the block above. Top-owned + bottom snug; the first-child reset

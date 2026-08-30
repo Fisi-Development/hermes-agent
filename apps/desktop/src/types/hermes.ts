@@ -548,6 +548,7 @@ export interface SessionMessage {
    * the full call from this field. Absent on a backend older than this app.
    */
   args?: unknown
+  codex_message_items?: unknown
   codex_reasoning_items?: unknown
   content: unknown
   context?: unknown

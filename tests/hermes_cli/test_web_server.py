@@ -1859,6 +1859,59 @@ class TestWebServerEndpoints:
         resp = self.client.get("/api/sessions/neg-offset-messages/messages?offset=-1")
         assert resp.status_code == 422
 
+    def test_get_session_messages_decodes_codex_display_sidecars(self):
+        from hermes_state import SessionDB
+
+        reasoning_items = [
+            {
+                "id": "rs_route_sidecars",
+                "type": "reasoning",
+                "summary": [
+                    {"type": "summary_text", "text": "Inspecting the transcript"}
+                ],
+            }
+        ]
+        message_items = [
+            {
+                "id": "msg_route_sidecars",
+                "type": "message",
+                "role": "assistant",
+                "phase": "commentary",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "I’m checking the persisted turn now.",
+                    }
+                ],
+            }
+        ]
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="codex-display-sidecars", source="cli")
+            db.append_message(
+                session_id="codex-display-sidecars",
+                role="assistant",
+                content="Canonical final answer.",
+                reasoning=(
+                    "Inspecting the transcript\n\n"
+                    "I’m checking the persisted turn now."
+                ),
+                codex_reasoning_items=reasoning_items,
+                codex_message_items=message_items,
+            )
+        finally:
+            db.close()
+
+        response = self.client.get(
+            "/api/sessions/codex-display-sidecars/messages?order=latest"
+        )
+
+        assert response.status_code == 200
+        persisted = response.json()["messages"][0]
+        assert persisted["codex_reasoning_items"] == reasoning_items
+        assert persisted["codex_message_items"] == message_items
+
     def test_get_session_messages_limit_above_500_is_capped_not_rejected(self):
         """A limit above the documented 500-row cap is silently clamped
         (existing ``min(limit, 500)`` behaviour), not rejected — the request

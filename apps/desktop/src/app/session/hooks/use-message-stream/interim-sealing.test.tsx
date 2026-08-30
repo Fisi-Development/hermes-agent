@@ -4,7 +4,7 @@ import { useEffect, useRef } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ClientSessionState } from '@/app/types'
-import { chatMessageText } from '@/lib/chat-messages'
+import { type ChatMessage, chatMessageText, toChatMessages } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { clearSessionTodos } from '@/store/todos'
 import type { RpcEvent } from '@/types/hermes'
@@ -310,5 +310,125 @@ describe('useMessageStream interim text sealing', () => {
     // New turn starts
     await start()
     expect(getState().interimBoundaryPending).toBe(false)
+  })
+
+  it('matches persisted Codex commentary hydration to the live interim projection', async () => {
+    const commentary = 'I’m checking the persisted turn now.'
+
+    const expectedSemantics = [
+      { sourceId: 'rs_resume:summary:0', text: 'Inspecting the transcript', type: 'reasoning' },
+      { text: commentary, type: 'text' }
+    ]
+
+    const visibleSemantics = (messages: ChatMessage[]) =>
+      messages
+        .filter(message => message.role === 'assistant' && !message.hidden)
+        .flatMap(message => message.parts)
+        .flatMap(part => {
+          if (part.type === 'reasoning') {
+            return [{ sourceId: (part as { sourceId?: string }).sourceId, text: part.text, type: 'reasoning' }]
+          }
+
+          return part.type === 'text' && part.text ? [{ text: part.text, type: 'text' }] : []
+        })
+
+    await mountStream()
+    await start()
+    await act(() =>
+      handleEvent!({
+        payload: { reasoning_id: 'rs_resume:summary:0', text: 'Inspecting the transcript' },
+        session_id: SID,
+        type: 'reasoning.delta'
+      })
+    )
+    await delta(commentary)
+    await interim(commentary)
+    await act(() =>
+      handleEvent!({
+        payload: { args: { command: 'printf parity' }, name: 'terminal', tool_id: 'tc_parity' },
+        session_id: SID,
+        type: 'tool.start'
+      })
+    )
+
+    await act(() =>
+      handleEvent!({
+        payload: { name: 'terminal', result: { output: 'parity' }, tool_id: 'tc_parity' },
+        session_id: SID,
+        type: 'tool.complete'
+      })
+    )
+    await complete('')
+
+    const liveMessages = getState().messages
+
+    const liveTool = liveMessages
+      .flatMap(message => message.parts)
+      .find(part => part.type === 'tool-call' && part.toolCallId === 'tc_parity')
+
+    expect(liveTool).toMatchObject({
+      args: { command: 'printf parity' },
+      result: { output: 'parity' },
+      toolCallId: 'tc_parity',
+      toolName: 'terminal',
+      type: 'tool-call'
+    })
+
+    const hydratedMessages = toChatMessages([
+      {
+        role: 'assistant',
+        content: '',
+        reasoning: `Inspecting the transcript\n\n${commentary}`,
+        codex_reasoning_items: [
+          {
+            type: 'reasoning',
+            id: 'rs_resume',
+            summary: [{ type: 'summary_text', text: 'Inspecting the transcript' }]
+          }
+        ],
+        codex_message_items: [
+          {
+            type: 'message',
+            role: 'assistant',
+            status: 'completed',
+            content: [{ type: 'output_text', text: commentary }],
+            phase: 'commentary'
+          }
+        ],
+        tool_calls: [
+          {
+            id: 'tc_parity',
+            function: { name: 'terminal', arguments: '{"command":"printf parity"}' }
+          }
+        ],
+        timestamp: 1
+      }
+    ])
+
+    const hydratedParts = hydratedMessages.flatMap(message => message.parts)
+
+    const hydratedCommentaryIndex = hydratedParts.findIndex(part => part.type === 'text' && part.text === commentary)
+
+    const hydratedToolIndex = hydratedParts.findIndex(
+      part => part.type === 'tool-call' && part.toolCallId === 'tc_parity'
+    )
+
+    expect(hydratedToolIndex).toBeGreaterThan(hydratedCommentaryIndex)
+    expect(hydratedParts[hydratedToolIndex]).toMatchObject({
+      args: { command: 'printf parity' },
+      toolCallId: 'tc_parity',
+      toolName: 'terminal',
+      type: 'tool-call'
+    })
+
+    const liveSemantics = visibleSemantics(liveMessages)
+    const hydratedSemantics = visibleSemantics(hydratedMessages)
+
+    expect(liveSemantics).toEqual(expectedSemantics)
+    expect(hydratedSemantics).toEqual(expectedSemantics)
+    expect(liveSemantics.filter(part => part.type === 'text' && part.text === commentary)).toHaveLength(1)
+    expect(hydratedSemantics.filter(part => part.type === 'text' && part.text === commentary)).toHaveLength(1)
+    expect(liveSemantics.some(part => part.type === 'reasoning' && part.text === commentary)).toBe(false)
+    expect(hydratedSemantics.some(part => part.type === 'reasoning' && part.text === commentary)).toBe(false)
   })
 })

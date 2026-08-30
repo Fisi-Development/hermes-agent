@@ -2342,6 +2342,65 @@ def test_tool_ctx_sends_an_arg_preview_not_a_phrased_label():
     assert server._tool_ctx("web_search", {"query": "weather in NYC"}) == "weather in NYC"
 
 
+def test_history_to_messages_preserves_codex_message_items_for_tool_turn_resume_display():
+    # SessionDB already deserializes the provider-native sidecars. The display
+    # projection must transport them unchanged so a resumed desktop session can
+    # distinguish visible commentary from the flattened reasoning fallback.
+    codex_reasoning_items = [
+        {
+            "id": "rs_resume",
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "Inspecting the transcript"}],
+        }
+    ]
+    codex_message_items = [
+        {
+            "type": "message",
+            "role": "assistant",
+            "phase": "commentary",
+            "content": [
+                {"type": "output_text", "text": "I’m checking the persisted turn now."}
+            ],
+        }
+    ]
+    history = [
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning": "Inspecting the transcript\n\nI’m checking the persisted turn now.",
+            "codex_reasoning_items": codex_reasoning_items,
+            "codex_message_items": codex_message_items,
+            "tool_calls": [
+                {
+                    "id": "tc_resume",
+                    "type": "function",
+                    "function": {
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "printf commentary-e2e"}),
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "tc_resume", "content": "commentary-e2e"},
+    ]
+
+    assert server._history_to_messages(history) == [
+        {
+            "role": "assistant",
+            "text": "",
+            "reasoning": "Inspecting the transcript\n\nI’m checking the persisted turn now.",
+            "codex_reasoning_items": codex_reasoning_items,
+            "codex_message_items": codex_message_items,
+        },
+        {
+            "role": "tool",
+            "name": "terminal",
+            "context": "printf commentary-e2e",
+            "args": {"command": "printf commentary-e2e"},
+        },
+    ]
+
+
 def test_history_to_messages_keeps_reasoning_only_assistant_turn():
     # A thinking-only assistant turn (reasoning present, no visible text) is
     # persisted and recallable, but was dropped from the resumed session view

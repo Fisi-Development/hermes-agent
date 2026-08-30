@@ -3307,9 +3307,20 @@ class APIServerAdapter(BasePlatformAdapter):
         safe_keys = (
             "id", "session_id", "role", "content", "tool_call_id", "tool_calls",
             "tool_name", "timestamp", "token_count", "finish_reason", "reasoning",
-            "reasoning_content",
+            "reasoning_content", "codex_reasoning_items", "codex_message_items",
         )
-        return {key: message.get(key) for key in safe_keys if key in message}
+        payload = {key: message.get(key) for key in safe_keys if key in message}
+        # get_messages() intentionally returns these SQLite TEXT columns raw.
+        # Decode valid provider sidecars for display clients; malformed values
+        # stay non-array so the renderer keeps the complete legacy fallback.
+        for key in ("codex_reasoning_items", "codex_message_items"):
+            value = payload.get(key)
+            if isinstance(value, str):
+                try:
+                    payload[key] = json.loads(value)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        return payload
 
     async def _read_json_body(self, request: "web.Request") -> tuple[Dict[str, Any], Optional["web.Response"]]:
         try:

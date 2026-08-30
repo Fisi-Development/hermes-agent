@@ -96,6 +96,546 @@ describe('toChatMessages', () => {
     ])
   })
 
+  it('hydrates Codex commentary as assistant text outside native reasoning', () => {
+    const [message] = toChatMessages([
+      {
+        role: 'assistant',
+        content: '',
+        reasoning:
+          '**Resuming process and rerunning canonical test**\n\nDeadlock is no longer running.',
+        codex_reasoning_items: [
+          {
+            type: 'reasoning',
+            id: 'rs_resume',
+            summary: [
+              {
+                type: 'summary_text',
+                text: '**Resuming process and rerunning canonical test**'
+              }
+            ]
+          }
+        ],
+        codex_message_items: [
+          {
+            type: 'message',
+            role: 'assistant',
+            status: 'completed',
+            content: [{ type: 'output_text', text: 'Deadlock is no longer running.' }],
+            phase: 'commentary'
+          }
+        ],
+        tool_calls: [
+          {
+            id: 'tc_status',
+            function: { name: 'terminal', arguments: '{"command":"git status --short"}' }
+          }
+        ],
+        timestamp: 1
+      }
+    ])
+
+    expect(message.parts.map(part => part.type)).toEqual(['reasoning', 'text', 'tool-call'])
+    expect(message.parts[0]).toEqual({
+      type: 'reasoning',
+      sourceId: 'rs_resume:summary:0',
+      text: '**Resuming process and rerunning canonical test**'
+    })
+    expect(message.parts[1]).toEqual({ type: 'text', text: 'Deadlock is no longer running.' })
+    expect(message.parts[2]).toMatchObject({
+      type: 'tool-call',
+      toolCallId: 'tc_status',
+      toolName: 'terminal'
+    })
+    expect(
+      message.parts.filter(
+        part => part.type === 'text' && part.text === 'Deadlock is no longer running.'
+      )
+    ).toHaveLength(1)
+  })
+
+  it('hydrates commentary-only Codex rows without a reasoning part', () => {
+    const [message] = toChatMessages([
+      {
+        role: 'assistant',
+        content: '',
+        reasoning: 'A concise progress update.',
+        codex_message_items: [
+          {
+            type: 'message',
+            role: 'assistant',
+            phase: 'commentary',
+            content: [{ type: 'output_text', text: 'A concise progress update.' }]
+          }
+        ],
+        timestamp: 1
+      }
+    ])
+
+    expect(message.parts).toEqual([{ type: 'text', text: 'A concise progress update.' }])
+    expect(message.parts.filter(part => part.type === 'reasoning')).toHaveLength(0)
+  })
+
+  it('keeps unstructured reasoning before an exact Codex commentary suffix', () => {
+    const [message] = toChatMessages([
+      {
+        role: 'assistant',
+        content: '',
+        reasoning: 'Opaque provider reasoning\n\nVisible progress.',
+        codex_message_items: [
+          {
+            type: 'message',
+            role: 'assistant',
+            phase: 'commentary',
+            content: [{ type: 'output_text', text: 'Visible progress.' }]
+          }
+        ],
+        timestamp: 1
+      }
+    ])
+
+    expect(message.parts).toEqual([
+      { type: 'reasoning', text: 'Opaque provider reasoning' },
+      { type: 'text', text: 'Visible progress.' }
+    ])
+  })
+
+  it('preserves native multi-summary reasoning identities before Codex commentary', () => {
+    const [message] = toChatMessages([
+      {
+        role: 'assistant',
+        content: '',
+        reasoning: 'Inspect source\nCheck tests\n\nVerify result\n\nVisible update.',
+        codex_reasoning_items: [
+          {
+            type: 'reasoning',
+            id: 'rs_inspect',
+            summary: [
+              { type: 'summary_text', text: 'Inspect source' },
+              { type: 'summary_text', text: 'Check tests' }
+            ]
+          },
+          {
+            type: 'reasoning',
+            id: 'rs_verify',
+            summary: [{ type: 'summary_text', text: 'Verify result' }]
+          }
+        ],
+        codex_message_items: [
+          {
+            type: 'message',
+            role: 'assistant',
+            phase: 'commentary',
+            content: [{ type: 'output_text', text: 'Visible update.' }]
+          }
+        ],
+        timestamp: 1
+      }
+    ])
+
+    expect(message.parts).toEqual([
+      { type: 'reasoning', sourceId: 'rs_inspect:summary:0', text: 'Inspect source' },
+      { type: 'reasoning', sourceId: 'rs_inspect:summary:1', text: 'Check tests' },
+      { type: 'reasoning', sourceId: 'rs_verify:summary:0', text: 'Verify result' },
+      { type: 'text', text: 'Visible update.' }
+    ])
+  })
+
+  it('fails closed when valid Codex commentary has a malformed sibling', () => {
+    const commentary = {
+      type: 'message',
+      role: 'assistant',
+      phase: 'commentary',
+      content: [{ type: 'output_text', text: 'Visible update.' }]
+    }
+
+    const malformedSiblings: Array<{ label: string; sibling: unknown }> = [
+      { label: 'non-object', sibling: 'malformed' },
+      {
+        label: 'wrong type',
+        sibling: {
+          type: 'reasoning',
+          role: 'assistant',
+          phase: 'analysis'
+        }
+      },
+      {
+        label: 'wrong role',
+        sibling: {
+          type: 'message',
+          role: 'user',
+          phase: 'commentary',
+          content: [{ type: 'output_text', text: 'Ambiguous update.' }]
+        }
+      },
+      {
+        label: 'missing phase',
+        sibling: {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'Ambiguous update.' }]
+        }
+      },
+      {
+        label: 'unknown phase',
+        sibling: {
+          type: 'message',
+          role: 'assistant',
+          phase: 'Commentary',
+          content: [{ type: 'output_text', text: 'Ambiguous update.' }]
+        }
+      }
+    ]
+
+    for (const { label, sibling } of malformedSiblings) {
+      const [message] = toChatMessages([
+        {
+          role: 'assistant',
+          content: '',
+          reasoning: 'Visible update.',
+          codex_message_items: [commentary, sibling],
+          timestamp: 1
+        }
+      ])
+
+      expect(message.parts, label).toEqual([{ type: 'reasoning', text: 'Visible update.' }])
+      expect(message.parts.filter(part => part.type === 'text'), label).toHaveLength(0)
+    }
+  })
+
+  it('fails closed when recognized non-commentary Codex siblings have malformed content', () => {
+    const commentary = {
+      type: 'message',
+      role: 'assistant',
+      phase: 'commentary',
+      content: [{ type: 'output_text', text: 'Visible update.' }]
+    }
+
+    const malformedSiblings = [
+      {
+        label: 'analysis with non-array content',
+        sibling: { type: 'message', role: 'assistant', phase: 'analysis', content: 'Private analysis.' }
+      },
+      {
+        label: 'final_answer with unsupported content child',
+        sibling: {
+          type: 'message',
+          role: 'assistant',
+          phase: 'final_answer',
+          content: [{ type: 'unsupported', text: 'Sidecar final answer.' }]
+        }
+      },
+      {
+        label: 'final with empty content',
+        sibling: { type: 'message', role: 'assistant', phase: 'final', content: [] }
+      },
+      {
+        label: 'analysis with non-string output text',
+        sibling: {
+          type: 'message',
+          role: 'assistant',
+          phase: 'analysis',
+          content: [{ type: 'output_text', text: 42 }]
+        }
+      }
+    ]
+
+    for (const { label, sibling } of malformedSiblings) {
+      const [message] = toChatMessages([
+        {
+          role: 'assistant',
+          content: '',
+          reasoning: 'Visible update.',
+          codex_message_items: [commentary, sibling],
+          timestamp: 1
+        }
+      ])
+
+      expect(message.parts, label).toEqual([{ type: 'reasoning', text: 'Visible update.' }])
+      expect(message.parts.filter(part => part.type === 'text'), label).toHaveLength(0)
+    }
+  })
+
+  it('ignores well-formed non-commentary siblings during Codex commentary extraction', () => {
+    const [message] = toChatMessages([
+      {
+        role: 'assistant',
+        content: '',
+        reasoning: 'Visible update.',
+        codex_message_items: [
+          {
+            type: 'message',
+            role: 'assistant',
+            phase: 'analysis',
+            content: [{ type: 'output_text', text: 'Private analysis.' }]
+          },
+          {
+            type: 'message',
+            role: 'assistant',
+            phase: 'commentary',
+            content: [{ type: 'output_text', text: 'Visible update.' }]
+          },
+          {
+            type: 'message',
+            role: 'assistant',
+            phase: 'final_answer',
+            content: [{ type: 'output_text', text: 'Sidecar final answer.' }]
+          },
+          {
+            type: 'message',
+            role: 'assistant',
+            phase: 'final',
+            content: [{ type: 'output_text', text: 'Legacy sidecar final answer.' }]
+          }
+        ],
+        timestamp: 1
+      }
+    ])
+
+    expect(message.parts).toEqual([{ type: 'text', text: 'Visible update.' }])
+    expect(message.parts.filter(part => part.type === 'text')).toHaveLength(1)
+  })
+
+  it('fails closed for malformed Codex commentary message items', () => {
+    const malformedItems = [
+      {
+        label: 'non-array content',
+        item: { type: 'message', role: 'assistant', phase: 'commentary', content: 'Visible update.' }
+      },
+      {
+        label: 'missing phase',
+        item: {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'Visible update.' }]
+        }
+      },
+      {
+        label: 'missing text',
+        item: {
+          type: 'message',
+          role: 'assistant',
+          phase: 'commentary',
+          content: [{ type: 'output_text' }]
+        }
+      },
+      {
+        label: 'empty text',
+        item: {
+          type: 'message',
+          role: 'assistant',
+          phase: 'commentary',
+          content: [{ type: 'output_text', text: '' }]
+        }
+      },
+      {
+        label: 'wrong role',
+        item: {
+          type: 'message',
+          role: 'user',
+          phase: 'commentary',
+          content: [{ type: 'output_text', text: 'Visible update.' }]
+        }
+      }
+    ]
+
+    for (const { item, label } of malformedItems) {
+      const [message] = toChatMessages([
+        {
+          role: 'assistant',
+          content: '',
+          reasoning: 'Legacy reasoning must remain whole.',
+          codex_message_items: [item],
+          timestamp: 1
+        }
+      ])
+
+      expect(message.parts, label).toEqual([{ type: 'reasoning', text: 'Legacy reasoning must remain whole.' }])
+    }
+  })
+
+  it('fails closed instead of partially parsing malformed commentary content', () => {
+    const [message] = toChatMessages([
+      {
+        role: 'assistant',
+        content: '',
+        reasoning: 'Visible update.',
+        codex_message_items: [
+          {
+            type: 'message',
+            role: 'assistant',
+            phase: 'commentary',
+            content: [
+              { type: 'output_text', text: 'Visible update.' },
+              { type: 'unsupported', text: 'must invalidate the whole projection' }
+            ]
+          }
+        ],
+        timestamp: 1
+      }
+    ])
+
+    expect(message.parts).toEqual([{ type: 'reasoning', text: 'Visible update.' }])
+  })
+
+  it('keeps full reasoning when Codex commentary is not an exact suffix', () => {
+    const mismatches = [
+      'Prefix Visible update. trailing reasoning',
+      'Prefix reasoning\nVisible update.'
+    ]
+
+    for (const reasoning of mismatches) {
+      const [message] = toChatMessages([
+        {
+          role: 'assistant',
+          content: '',
+          reasoning,
+          codex_message_items: [
+            {
+              type: 'message',
+              role: 'assistant',
+              phase: 'commentary',
+              content: [{ type: 'output_text', text: 'Visible update.' }]
+            }
+          ],
+          timestamp: 1
+        }
+      ])
+
+      expect(message.parts).toEqual([{ type: 'reasoning', text: reasoning }])
+    }
+  })
+
+  it('ignores final-answer sidecars and renders canonical content once', () => {
+    const [message] = toChatMessages([
+      {
+        role: 'assistant',
+        content: 'Canonical final answer.',
+        codex_message_items: [
+          {
+            type: 'message',
+            role: 'assistant',
+            phase: 'final_answer',
+            content: [{ type: 'output_text', text: 'Sidecar final answer.' }]
+          }
+        ],
+        timestamp: 1
+      }
+    ])
+
+    expect(message.parts).toEqual([{ type: 'text', text: 'Canonical final answer.' }])
+    expect(chatMessageText(message)).not.toContain('Sidecar final answer.')
+  })
+
+  it('keeps analysis-phase sidecars in reasoning', () => {
+    const [message] = toChatMessages([
+      {
+        role: 'assistant',
+        content: '',
+        reasoning: 'Internal analysis stays in reasoning.',
+        codex_message_items: [
+          {
+            type: 'message',
+            role: 'assistant',
+            phase: 'analysis',
+            content: [{ type: 'output_text', text: 'Internal analysis stays in reasoning.' }]
+          }
+        ],
+        timestamp: 1
+      }
+    ])
+
+    expect(message.parts).toEqual([{ type: 'reasoning', text: 'Internal analysis stays in reasoning.' }])
+    expect(message.parts.filter(part => part.type === 'text')).toHaveLength(0)
+  })
+
+  it('preserves multiple Codex commentary messages in order', () => {
+    const [message] = toChatMessages([
+      {
+        role: 'assistant',
+        content: '',
+        reasoning: 'Private reasoning\n\nFirst update.\n\nSecond update.',
+        codex_message_items: [
+          {
+            type: 'message',
+            role: 'assistant',
+            phase: 'commentary',
+            content: [{ type: 'output_text', text: 'First update.' }]
+          },
+          {
+            type: 'message',
+            role: 'assistant',
+            phase: 'commentary',
+            content: [{ type: 'output_text', text: 'Second update.' }]
+          }
+        ],
+        timestamp: 1
+      }
+    ])
+
+    expect(message.parts).toEqual([
+      { type: 'reasoning', text: 'Private reasoning' },
+      { type: 'text', text: 'First update.' },
+      { type: 'text', text: 'Second update.' }
+    ])
+  })
+
+  it('fails closed when multiple Codex commentary messages do not match exactly', () => {
+    const reasoning = 'Private reasoning\n\nSecond update.\n\nFirst update.'
+
+    const [message] = toChatMessages([
+      {
+        role: 'assistant',
+        content: '',
+        reasoning,
+        codex_message_items: [
+          {
+            type: 'message',
+            role: 'assistant',
+            phase: 'commentary',
+            content: [{ type: 'output_text', text: 'First update.' }]
+          },
+          {
+            type: 'message',
+            role: 'assistant',
+            phase: 'commentary',
+            content: [{ type: 'output_text', text: 'Second update.' }]
+          }
+        ],
+        timestamp: 1
+      }
+    ])
+
+    expect(message.parts).toEqual([{ type: 'reasoning', text: reasoning }])
+  })
+
+  it('fails closed on duplicate Codex commentary sidecars that do not match reasoning', () => {
+    const [message] = toChatMessages([
+      {
+        role: 'assistant',
+        content: '',
+        reasoning: 'Duplicate update.',
+        codex_message_items: [
+          {
+            type: 'message',
+            role: 'assistant',
+            phase: 'commentary',
+            content: [{ type: 'output_text', text: 'Duplicate update.' }]
+          },
+          {
+            type: 'message',
+            role: 'assistant',
+            phase: 'commentary',
+            content: [{ type: 'output_text', text: 'Duplicate update.' }]
+          }
+        ],
+        timestamp: 1
+      }
+    ])
+
+    expect(message.parts).toEqual([{ type: 'reasoning', text: 'Duplicate update.' }])
+    expect(message.parts.filter(part => part.type === 'text')).toHaveLength(0)
+  })
+
   it('keeps a turn with interleaved tool-only rows in a single bubble', () => {
     const messages = toChatMessages([
       { role: 'assistant', content: 'Planning.', timestamp: 1 },

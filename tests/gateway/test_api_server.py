@@ -54,6 +54,55 @@ class TestCheckRequirements:
 
 
 # ---------------------------------------------------------------------------
+# Session message response projection
+# ---------------------------------------------------------------------------
+
+
+class TestMessageResponse:
+    def test_preserves_codex_display_sidecars_for_desktop_hydration(self):
+        codex_reasoning_items = [
+            {
+                "type": "reasoning",
+                "id": "rs_resume",
+                "summary": [
+                    {"type": "summary_text", "text": "Inspecting the transcript"},
+                ],
+            },
+        ]
+        codex_message_items = [
+            {
+                "type": "message",
+                "phase": "commentary",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "I’m checking the persisted turn now.",
+                    },
+                ],
+            },
+        ]
+
+        response = APIServerAdapter._message_response(
+            {
+                "id": 1,
+                "role": "assistant",
+                "content": "",
+                "reasoning": (
+                    "Inspecting the transcript\n\n"
+                    "I’m checking the persisted turn now."
+                ),
+                # SessionDB.get_messages() returns structured sidecars as their
+                # JSON-encoded SQLite TEXT representation.
+                "codex_reasoning_items": json.dumps(codex_reasoning_items),
+                "codex_message_items": json.dumps(codex_message_items),
+            },
+        )
+
+        assert response["codex_reasoning_items"] == codex_reasoning_items
+        assert response["codex_message_items"] == codex_message_items
+
+
+# ---------------------------------------------------------------------------
 # _redact_api_error_text — guards every outward error site (envelopes, SSE
 # error events, cron-endpoint 500 bodies) that routes raw exception text to
 # authenticated HTTP clients. #37733

@@ -986,6 +986,90 @@ function withUniqueToolCallIds(messages: ChatMessage[]): ChatMessage[] {
   })
 }
 
+function codexOutputText(value: unknown): string | null {
+  if (!Array.isArray(value) || !value.length) {
+    return null
+  }
+
+  const chunks: string[] = []
+
+  for (const rawContent of value) {
+    if (!rawContent || typeof rawContent !== 'object') {
+      return null
+    }
+
+    const content = rawContent as { text?: unknown; type?: unknown }
+
+    if (content.type !== 'output_text' || typeof content.text !== 'string' || !content.text) {
+      return null
+    }
+
+    chunks.push(content.text)
+  }
+
+  return chunks.join('')
+}
+
+function nativeCodexCommentary(
+  value: unknown,
+  reasoningText: string
+): { messages: string[]; reasoningRemainder: string } {
+  if (!Array.isArray(value)) {
+    return { messages: [], reasoningRemainder: reasoningText }
+  }
+
+  const messages: string[] = []
+
+  for (const rawItem of value) {
+    if (!rawItem || typeof rawItem !== 'object') {
+      return { messages: [], reasoningRemainder: reasoningText }
+    }
+
+    const item = rawItem as { content?: unknown; phase?: unknown; role?: unknown; type?: unknown }
+
+    if (item.type !== 'message' || item.role !== 'assistant') {
+      return { messages: [], reasoningRemainder: reasoningText }
+    }
+
+    const message = codexOutputText(item.content)
+
+    if (message === null) {
+      return { messages: [], reasoningRemainder: reasoningText }
+    }
+
+    if (item.phase !== 'commentary') {
+      if (item.phase === 'analysis' || item.phase === 'final_answer' || item.phase === 'final') {
+        continue
+      }
+
+      return { messages: [], reasoningRemainder: reasoningText }
+    }
+
+    messages.push(message)
+  }
+
+  if (!messages.length) {
+    return { messages: [], reasoningRemainder: reasoningText }
+  }
+
+  const flattened = messages.join('\n\n')
+
+  if (reasoningText === flattened) {
+    return { messages, reasoningRemainder: '' }
+  }
+
+  const delimitedSuffix = `\n\n${flattened}`
+
+  if (reasoningText.endsWith(delimitedSuffix)) {
+    return {
+      messages,
+      reasoningRemainder: reasoningText.slice(0, -delimitedSuffix.length)
+    }
+  }
+
+  return { messages: [], reasoningRemainder: reasoningText }
+}
+
 function nativeCodexReasoningParts(value: unknown, reasoningText: string): ChatMessagePart[] {
   if (!Array.isArray(value)) {return []}
 
@@ -1117,12 +1201,21 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       message.reasoning_content ||
       (typeof message.reasoning_details === 'string' ? message.reasoning_details : '')
 
-    const structuredReasoningParts = nativeCodexReasoningParts(message.codex_reasoning_items, reasoning)
+    const commentary = nativeCodexCommentary(message.codex_message_items, reasoning)
+
+    const structuredReasoningParts = nativeCodexReasoningParts(
+      message.codex_reasoning_items,
+      commentary.reasoningRemainder
+    )
 
     if (structuredReasoningParts.length && message.role === 'assistant') {
       parts.push(...structuredReasoningParts)
-    } else if (reasoning && message.role === 'assistant') {
-      parts.push(reasoningPart(reasoning))
+    } else if (commentary.reasoningRemainder && message.role === 'assistant') {
+      parts.push(reasoningPart(commentary.reasoningRemainder))
+    }
+
+    if (message.role === 'assistant') {
+      parts.push(...commentary.messages.map(assistantTextPart))
     }
 
     if (displayContent) {

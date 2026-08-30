@@ -7262,8 +7262,6 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
                     except (json.JSONDecodeError, TypeError):
                         args = {}
                     tool_call_args[tc_id] = (fn["name"], args)
-            if not content_text.strip():
-                continue
         if role == "tool":
             tc_id = m.get("tool_call_id", "")
             tc_info = tool_call_args.get(tc_id) if tc_id else None
@@ -7279,23 +7277,23 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
                 tool_msg["args"] = args
             messages.append(tool_msg)
             continue
-        # An assistant turn may carry only reasoning/thinking content with no
-        # visible text (extended-thinking turns, thinking-only recovery
-        # responses). Such a turn is persisted with its reasoning fields and is
-        # recallable from the transcript, but dropping it here as "empty" makes
-        # it vanish from the resumed/reloaded session view while the desktop's
-        # reasoning disclosure has nothing to render. Keep it when it carries
-        # reasoning so the "Thinking…" block still shows. (#44022)
-        reasoning_keys = (
+        # An assistant turn may carry only reasoning/thinking content or a
+        # provider-native display sidecar with no canonical visible text. Such
+        # a turn is persisted and recallable from the transcript, but dropping
+        # it here as "empty" makes it vanish from the resumed/reloaded session
+        # view. Keep and forward those sidecars so clients can reconstruct the
+        # reasoning disclosure and separate visible commentary. (#44022)
+        assistant_display_sidecar_keys = (
             "reasoning",
             "reasoning_content",
             "reasoning_details",
             "codex_reasoning_items",
+            "codex_message_items",
         )
-        has_reasoning = role == "assistant" and any(
-            m.get(key) for key in reasoning_keys
+        has_assistant_display_sidecar = role == "assistant" and any(
+            m.get(key) for key in assistant_display_sidecar_keys
         )
-        if not content_text.strip() and not has_reasoning:
+        if not content_text.strip() and not has_assistant_display_sidecar:
             continue
         msg = {"role": role, "text": content_text}
         # Durable row identity, stamped by _rows_to_conversation. The renderer's
@@ -7314,7 +7312,7 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
                 msg["text"] = invocation
                 msg["display_kind"] = "skill_invocation"
         if role == "assistant":
-            for key in reasoning_keys:
+            for key in assistant_display_sidecar_keys:
                 if key in m and m.get(key) is not None:
                     msg[key] = m.get(key)
         # Forward display-only timeline metadata so the TUI can render
