@@ -274,6 +274,135 @@ def test_normalize_codex_response_treats_summary_only_reasoning_as_incomplete():
     assert assistant_message.codex_reasoning_items is None
 
 
+@pytest.mark.parametrize("phase", [" Commentary ", "COMMENTARY", "unknown"])
+def test_normalize_codex_response_drops_noncanonical_nonempty_phase_from_display(phase):
+    response = SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="message",
+                id="msg_preamble",
+                phase=phase,
+                status="completed",
+                content=[SimpleNamespace(type="output_text", text="internal preamble")],
+            )
+        ],
+        status="completed",
+    )
+
+    assistant_message, _ = _normalize_codex_response(response)
+
+    assert assistant_message.content == ""
+    assert not assistant_message.reasoning
+    assert not getattr(assistant_message, "reasoning_content", "")
+    assert assistant_message.codex_message_items == [
+        {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "internal preamble"}],
+            "id": "msg_preamble",
+            "phase": phase,
+        }
+    ]
+
+
+@pytest.mark.parametrize("phase", [None, "final", "final_answer"])
+def test_normalize_codex_response_keeps_only_canonical_final_phases_in_content(phase):
+    item = SimpleNamespace(
+        type="message",
+        id="msg_final",
+        status="completed",
+        content=[SimpleNamespace(type="output_text", text="final answer")],
+    )
+    if phase is not None:
+        item.phase = phase
+    response = SimpleNamespace(output=[item], status="completed")
+
+    assistant_message, _ = _normalize_codex_response(response)
+
+    assert assistant_message.content == "final answer"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        [SimpleNamespace(type="text", text="legacy preamble")],
+        [
+            SimpleNamespace(type="output_text", text="safe-looking prefix"),
+            SimpleNamespace(type="text", text="malformed suffix"),
+        ],
+        [SimpleNamespace(type="output_text", text="")],
+    ],
+)
+def test_normalize_codex_response_rejects_entire_malformed_commentary_item(content):
+    response = SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="message",
+                id="msg_commentary",
+                phase="commentary",
+                status="completed",
+                content=content,
+            )
+        ],
+        status="completed",
+    )
+
+    assistant_message, _ = _normalize_codex_response(response)
+
+    assert assistant_message.content == ""
+    assert not assistant_message.reasoning
+    assert not getattr(assistant_message, "reasoning_content", "")
+    assert not getattr(assistant_message, "codex_message_items", None)
+
+
+@pytest.mark.parametrize(
+    "malformed_content",
+    [
+        [
+            SimpleNamespace(type="output_text", text="partial"),
+            SimpleNamespace(type="text", text="malformed"),
+        ],
+        [SimpleNamespace(type="output_text", text="")],
+    ],
+)
+def test_normalize_codex_response_rejects_all_commentary_siblings_atomically(
+    malformed_content,
+):
+    response = SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="message",
+                id="msg_valid",
+                phase="commentary",
+                status="completed",
+                content=[SimpleNamespace(type="output_text", text="valid preamble")],
+            ),
+            SimpleNamespace(
+                type="message",
+                id="msg_malformed",
+                phase="commentary",
+                status="completed",
+                content=malformed_content,
+            ),
+            SimpleNamespace(
+                type="message",
+                id="msg_final",
+                phase="final_answer",
+                status="completed",
+                content=[SimpleNamespace(type="output_text", text="final answer")],
+            ),
+        ],
+        status="completed",
+    )
+
+    assistant_message, _ = _normalize_codex_response(response)
+
+    assert assistant_message.content == "final answer"
+    assert not assistant_message.reasoning
+    assert not getattr(assistant_message, "codex_message_items", None)
+
+
 # ---------------------------------------------------------------------------
 # Server-side built-in tool calls (xAI native web_search, code interpreter,
 # etc.) come back as discrete ``*_call`` output items that xAI's
@@ -535,6 +664,30 @@ def test_preflight_codex_api_kwargs_drops_oversized_message_id_end_to_end():
 
     message_item = next(item for item in kwargs["input"] if item.get("type") == "message")
     assert "id" not in message_item
+
+
+def test_replayed_message_phase_is_preserved_exactly_through_wire_preflight():
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "codex_message_items": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "internal preamble"}],
+                    "phase": " Commentary ",
+                }
+            ],
+        }
+    ]
+
+    converted = _chat_messages_to_responses_input(messages)
+    normalized = _preflight_codex_input_items(converted)
+
+    assert converted[0]["phase"] == " Commentary "
+    assert normalized[0]["phase"] == " Commentary "
 
 
 # ---------------------------------------------------------------------------

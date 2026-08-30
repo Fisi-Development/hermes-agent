@@ -845,6 +845,139 @@ def test_consume_codex_stream_routes_commentary_phase_deltas_to_reasoning(monkey
     assert response.output_text == ""
 
 
+@pytest.mark.parametrize("phase", [" Commentary ", "COMMENTARY", "unknown"])
+def test_consume_codex_stream_drops_noncanonical_nonempty_phase_deltas(phase):
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    item = SimpleNamespace(
+        type="message",
+        phase=phase,
+        status="completed",
+        content=[SimpleNamespace(type="output_text", text="internal preamble")],
+    )
+    streamed = []
+    reasoning_streamed = []
+    commentary_messages = []
+
+    response = _consume_codex_event_stream(
+        _FakeCreateStream([
+            SimpleNamespace(
+                type="response.output_item.added",
+                item=SimpleNamespace(type="message", phase=phase),
+            ),
+            SimpleNamespace(type="response.output_text.delta", delta="internal preamble"),
+            SimpleNamespace(type="response.output_item.done", item=item),
+            SimpleNamespace(type="response.completed", response=SimpleNamespace(status="completed")),
+        ]),
+        model="gpt-5-codex",
+        on_text_delta=streamed.append,
+        on_reasoning_delta=reasoning_streamed.append,
+        on_commentary_message=commentary_messages.append,
+    )
+
+    assert streamed == []
+    assert reasoning_streamed == []
+    assert commentary_messages == []
+    assert response.output == [item]
+    assert response.output_text == ""
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        [SimpleNamespace(type="text", text="legacy preamble")],
+        [
+            SimpleNamespace(type="output_text", text="safe-looking prefix"),
+            SimpleNamespace(type="text", text="malformed suffix"),
+        ],
+        [SimpleNamespace(type="output_text", text="")],
+    ],
+)
+def test_consume_codex_stream_rejects_entire_malformed_commentary_item(content):
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    item = SimpleNamespace(
+        type="message",
+        phase="commentary",
+        status="completed",
+        content=content,
+    )
+    commentary_messages = []
+
+    response = _consume_codex_event_stream(
+        _FakeCreateStream([
+            SimpleNamespace(
+                type="response.output_item.added",
+                item=SimpleNamespace(type="message", phase="commentary"),
+            ),
+            SimpleNamespace(type="response.output_text.delta", delta="streamed preamble"),
+            SimpleNamespace(type="response.output_item.done", item=item),
+            SimpleNamespace(type="response.completed", response=SimpleNamespace(status="completed")),
+        ]),
+        model="gpt-5-codex",
+        on_commentary_message=commentary_messages.append,
+    )
+
+    assert commentary_messages == []
+    assert response.output == [item]
+
+
+def test_consume_codex_stream_preserves_reasoning_summary_boundaries(monkeypatch):
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    legacy_reasoning = []
+    structured_reasoning = []
+    _consume_codex_event_stream(
+        _FakeCreateStream([
+            SimpleNamespace(type="response.reasoning_summary_part.added", item_id="rs_first", summary_index=0),
+            SimpleNamespace(type="response.reasoning_summary_text.delta", item_id="rs_first", summary_index=0, delta="Inspecting"),
+            SimpleNamespace(type="response.reasoning_summary_part.done", item_id="rs_first", summary_index=0),
+            SimpleNamespace(type="response.reasoning_summary_text.delta", item_id="rs_first", summary_index=1, delta="Checking"),
+            SimpleNamespace(type="response.completed", response=SimpleNamespace(status="completed")),
+        ]),
+        model="gpt-5-codex",
+        on_reasoning_delta=legacy_reasoning.append,
+        on_reasoning_event=lambda phase, item_id, text="": structured_reasoning.append((phase, item_id, text)),
+    )
+    # A delta that claims a source which was never opened is malformed wire
+    # evidence. Preserve its text through the unstructured channel rather than
+    # manufacturing half of a structured lifecycle that hydration cannot
+    # reproduce safely.
+    assert legacy_reasoning == ["Checking"]
+    assert structured_reasoning == [
+        ("start", "rs_first:summary:0", ""),
+        ("delta", "rs_first:summary:0", "Inspecting"),
+        ("end", "rs_first:summary:0", ""),
+    ]
+
+
+def test_consume_codex_stream_rejects_crossed_reasoning_lifecycles_without_losing_text():
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    legacy_reasoning = []
+    structured_reasoning = []
+    _consume_codex_event_stream(
+        _FakeCreateStream([
+            SimpleNamespace(type="response.reasoning_summary_part.added", item_id="rs_first", summary_index=0),
+            SimpleNamespace(type="response.reasoning_summary_text.delta", item_id="rs_other", summary_index=0, delta="Preserve me"),
+            SimpleNamespace(type="response.reasoning_summary_part.done", item_id="rs_other", summary_index=0),
+            SimpleNamespace(type="response.reasoning_summary_text.delta", item_id="rs_first", summary_index=0, delta="Still valid"),
+            SimpleNamespace(type="response.reasoning_summary_part.done", item_id="rs_first", summary_index=0),
+            SimpleNamespace(type="response.completed", response=SimpleNamespace(status="completed")),
+        ]),
+        model="gpt-5-codex",
+        on_reasoning_delta=legacy_reasoning.append,
+        on_reasoning_event=lambda phase, item_id, text="": structured_reasoning.append((phase, item_id, text)),
+    )
+
+    assert legacy_reasoning == ["Preserve me"]
+    assert structured_reasoning == [
+        ("start", "rs_first:summary:0", ""),
+        ("delta", "rs_first:summary:0", "Still valid"),
+        ("end", "rs_first:summary:0", ""),
+    ]
+
+
 def test_consume_codex_stream_separates_commentary_from_analysis(monkeypatch):
     from agent.codex_runtime import _consume_codex_event_stream
 
@@ -2006,6 +2139,93 @@ def test_interim_commentary_precedes_content_from_real_codex_normalization(monke
         "text": "I'll inspect the repo first.",
         "already_streamed": False,
     }
+
+
+@pytest.mark.parametrize("phase", [" Commentary ", "COMMENTARY", "unknown"])
+def test_extract_codex_interim_visible_parts_rejects_noncanonical_phase(
+    monkeypatch, phase
+):
+    agent = _build_agent(monkeypatch)
+    assistant_msg = {
+        "codex_message_items": [
+            {
+                "type": "message",
+                "phase": phase,
+                "content": [{"type": "output_text", "text": "internal preamble"}],
+            }
+        ]
+    }
+
+    assert agent._extract_codex_interim_visible_parts(assistant_msg) == []
+
+
+def test_extract_codex_interim_visible_parts_ignores_exact_analysis():
+    from run_agent import AIAgent
+
+    agent = SimpleNamespace(
+        show_commentary=True,
+        _strip_think_blocks=lambda text: text,
+    )
+    assistant_msg = {
+        "codex_message_items": [
+            {
+                "type": "message",
+                "phase": "analysis",
+                "content": [{"type": "output_text", "text": "private scratchpad"}],
+            },
+            {
+                "type": "message",
+                "phase": "commentary",
+                "content": [{"type": "output_text", "text": "visible preamble"}],
+            },
+        ]
+    }
+
+    assert AIAgent._extract_codex_interim_visible_parts(agent, assistant_msg) == [
+        "visible preamble"
+    ]
+
+
+@pytest.mark.parametrize(
+    "malformed_content",
+    [
+        [
+            {"type": "output_text", "text": "partial"},
+            {"type": "text", "text": "malformed"},
+        ],
+        [{"type": "output_text", "text": ""}],
+    ],
+)
+def test_extract_codex_interim_visible_parts_rejects_commentary_siblings_atomically(
+    monkeypatch, malformed_content
+):
+    agent = _build_agent(monkeypatch)
+    assistant_msg = {
+        "codex_message_items": [
+            {
+                "type": "message",
+                "phase": "analysis",
+                "content": [{"type": "output_text", "text": "private scratchpad"}],
+            },
+            {
+                "type": "message",
+                "phase": "commentary",
+                "content": [{"type": "output_text", "text": "valid preamble"}],
+            },
+            {
+                "type": "message",
+                "phase": "commentary",
+                "content": malformed_content,
+            },
+            {
+                "type": "message",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "final answer"}],
+            },
+        ]
+    }
+
+    assert agent._extract_codex_interim_visible_parts(assistant_msg) == []
 
 
 

@@ -61,6 +61,18 @@ describe('withUniqueToolCallIdsWithinMessage', () => {
   })
 })
 
+describe('appendReasoningPart', () => {
+  it('does not append across an intervening tool boundary even for the same open source', () => {
+    const parts: ChatMessagePart[] = [reasoningPart('Before tool', 1, 'reasoning-a'), toolCallPart('tc-boundary')]
+
+    const result = appendReasoningPart(parts, 'After tool', 2, 'reasoning-a')
+
+    expect(result.map(part => part.type)).toEqual(['reasoning', 'tool-call', 'reasoning'])
+    expect(result[0]).toMatchObject({ sourceId: 'reasoning-a', text: 'Before tool' })
+    expect(result[2]).toMatchObject({ sourceId: 'reasoning-a', text: 'After tool', timestamp: 2 })
+  })
+})
+
 describe('toChatMessages', () => {
   it('rebuilds the full command from a gateway tool row carrying args', () => {
     // Gateway watch-window hydration projects tool rows as
