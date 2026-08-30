@@ -1492,6 +1492,12 @@ body.guest-pointer-lock :is(webview, iframe) {
   margin-block: var(--paragraph-gap) 0;
 }
 
+/* Native reasoning summary rows retain provider boundaries without acquiring
+   the ordinary assistant paragraph rhythm. */
+[data-slot='aui_thinking-disclosure'] .aui-md :where(p + p) {
+  margin-top: 0;
+}
+
 /* Headings are section breaks, so they own a larger top gap than prose — a
    leading `# title` (common in re-entered/delegated turns) no longer butts
    against the block above. Top-owned + bottom snug; the first-child reset
