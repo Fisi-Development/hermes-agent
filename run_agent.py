@@ -190,8 +190,10 @@ from agent.message_sanitization import (  # noqa: F401
     uniquify_tool_call_ids as _sanitize_uniquify_tool_call_ids,
 )
 from agent.codex_responses_adapter import (
+    _classify_responses_message_phase,
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
     _deterministic_call_id as _codex_deterministic_call_id,
+    _extract_responses_commentary_text,
     _split_responses_tool_id as _codex_split_responses_tool_id,
     _summarize_user_message_for_log,  # also used by _sync_external_memory_for_turn (memory boundary)
 )
@@ -493,6 +495,7 @@ class AIAgent:
         notice_clear_callback: callable = None,
         event_callback: Optional[Callable[[str, dict], None]] = None,
         reaction_callback: Optional[Callable[[str], None]] = None,
+        reasoning_event_callback: callable = None,
         max_tokens: int = None,
         reasoning_config: Dict[str, Any] = None,
         service_tier: str = None,
@@ -584,6 +587,7 @@ class AIAgent:
             notice_clear_callback=notice_clear_callback,
             event_callback=event_callback,
             reaction_callback=reaction_callback,
+            reasoning_event_callback=reasoning_event_callback,
             max_tokens=max_tokens,
             reasoning_config=reasoning_config,
             service_tier=service_tier,
@@ -6699,31 +6703,23 @@ class AIAgent:
 
         messages: List[str] = []
         for item in items:
-            if not isinstance(item, dict):
-                continue
-            if item.get("type") != "message":
-                continue
+            if not isinstance(item, dict) or item.get("type") != "message":
+                return []
             phase = item.get("phase")
-            if not isinstance(phase, str) or phase.strip().lower() != "commentary":
+            phase_class = _classify_responses_message_phase(phase)
+            if phase_class == "invalid":
+                return []
+            if phase_class != "commentary":
                 continue
-            content_parts = item.get("content")
-            if not isinstance(content_parts, list):
-                continue
-            item_parts: List[str] = []
-            for part in content_parts:
-                if not isinstance(part, dict):
-                    continue
-                if part.get("type") != "output_text":
-                    continue
-                text = part.get("text")
-                if isinstance(text, str) and text.strip():
-                    item_parts.append(text)
-            visible = "".join(item_parts).strip()
+            visible = _extract_responses_commentary_text(item)
+            if visible is None:
+                return []
             if visible:
                 visible = self._strip_think_blocks(visible).strip()
                 visible = redact_sensitive_text(visible)
-            if visible:
-                messages.append(visible)
+            if not visible:
+                return []
+            messages.append(visible)
         return messages
 
     def _extract_codex_interim_visible_text(self, assistant_msg: Dict[str, Any]) -> str:
