@@ -698,8 +698,8 @@ def _chat_messages_to_responses_input(
                             if len(stripped_id) <= _MAX_RESPONSES_ITEM_ID_LENGTH:
                                 replay_item["id"] = stripped_id
                         phase = raw_item.get("phase")
-                        if isinstance(phase, str) and phase.strip():
-                            replay_item["phase"] = phase.strip()
+                        if isinstance(phase, str) and phase:
+                            replay_item["phase"] = phase
                         items.append(replay_item)
                         item_sources.append(msg)
                         replayed_message_items += 1
@@ -1138,8 +1138,8 @@ def _preflight_codex_input_items(
                 if len(stripped_id) <= _MAX_RESPONSES_ITEM_ID_LENGTH:
                     normalized_item["id"] = stripped_id
             phase = item.get("phase")
-            if isinstance(phase, str) and phase.strip():
-                normalized_item["phase"] = phase.strip()
+            if isinstance(phase, str) and phase:
+                normalized_item["phase"] = phase
             normalized.append(normalized_item)
             continue
 
@@ -1455,6 +1455,40 @@ def _extract_responses_message_text(item: Any) -> str:
     return "".join(chunks).strip()
 
 
+def _responses_item_field(item: Any, name: str, default: Any = None) -> Any:
+    if isinstance(item, dict):
+        return item.get(name, default)
+    return getattr(item, name, default)
+
+
+def _extract_responses_commentary_text(item: Any) -> Optional[str]:
+    """Extract a complete canonical commentary item, or reject the item."""
+    content = _responses_item_field(item, "content")
+    if not isinstance(content, list) or not content:
+        return None
+
+    chunks: List[str] = []
+    for part in content:
+        if _responses_item_field(part, "type") != "output_text":
+            return None
+        text = _responses_item_field(part, "text")
+        if not isinstance(text, str) or not text:
+            return None
+        chunks.append(text)
+
+    commentary = "".join(chunks).strip()
+    return commentary or None
+
+
+def _classify_responses_message_phase(value: Any) -> str:
+    """Classify only exact Responses phases; unknown nonempty values fail closed."""
+    if value is None or value == "":
+        return "final"
+    if value in {"commentary", "analysis", "final", "final_answer"}:
+        return value
+    return "invalid"
+
+
 def _extract_responses_reasoning_text(item: Any) -> str:
     """Extract a compact reasoning text from a Responses reasoning item."""
     summary = getattr(item, "summary", None)
@@ -1589,6 +1623,14 @@ def _normalize_codex_response(
     saw_commentary_phase = False
     saw_final_answer_phase = False
     saw_reasoning_item = False
+    message_sidecar_valid = all(
+        not (
+            getattr(item, "type", None) == "message"
+            and getattr(item, "phase", None) == "commentary"
+            and _extract_responses_commentary_text(item) is None
+        )
+        for item in output
+    )
 
     # Server-side built-in tool calls (xAI's native web_search, code
     # interpreter, etc.) are executed by the provider and reported as
@@ -1634,16 +1676,17 @@ def _normalize_codex_response(
 
         if item_type == "message":
             item_phase = getattr(item, "phase", None)
-            normalized_phase = None
-            is_commentary_phase = False
-            if isinstance(item_phase, str):
-                normalized_phase = item_phase.strip().lower()
-                if normalized_phase in {"commentary", "analysis"}:
-                    saw_commentary_phase = True
-                    is_commentary_phase = True
-                elif normalized_phase in {"final_answer", "final"}:
-                    saw_final_answer_phase = True
-            message_text = _extract_responses_message_text(item)
+            phase_class = _classify_responses_message_phase(item_phase)
+            is_commentary_phase = phase_class in {"commentary", "analysis"}
+            if is_commentary_phase:
+                saw_commentary_phase = True
+            elif phase_class in {"final_answer", "final"} and item_phase is not None:
+                saw_final_answer_phase = True
+            message_text = (
+                _extract_responses_commentary_text(item)
+                if phase_class == "commentary"
+                else _extract_responses_message_text(item)
+            )
             if message_text:
                 # Responses ``commentary``/``analysis`` phase text is mid-turn
                 # preamble/progress narration, never the turn's final answer
@@ -1654,8 +1697,9 @@ def _normalize_codex_response(
                 # gateway display it like thinking text.  The exact message
                 # item is still preserved below for replay/cache continuity.
                 if is_commentary_phase:
-                    reasoning_parts.append(message_text)
-                else:
+                    if message_sidecar_valid:
+                        reasoning_parts.append(message_text)
+                elif phase_class != "invalid":
                     content_parts.append(message_text)
                 raw_message_item: Dict[str, Any] = {
                     "type": "message",
@@ -1666,9 +1710,10 @@ def _normalize_codex_response(
                 item_id = getattr(item, "id", None)
                 if isinstance(item_id, str) and item_id:
                     raw_message_item["id"] = item_id
-                if normalized_phase:
-                    raw_message_item["phase"] = normalized_phase
-                message_items_raw.append(raw_message_item)
+                if isinstance(item_phase, str) and item_phase:
+                    raw_message_item["phase"] = item_phase
+                if message_sidecar_valid:
+                    message_items_raw.append(raw_message_item)
         elif item_type == "reasoning":
             saw_reasoning_item = True
             reasoning_text = _extract_responses_reasoning_text(item)
