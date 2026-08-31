@@ -679,15 +679,26 @@ def _cmd_goal(rid, params, session, name, arg):
         max_turns = int((_load_cfg().get("goals") or {}).get("max_turns", 20) or 20)
     except Exception:
         max_turns = 20
-    mgr = goals.GoalManager(session_id=sid_key, default_max_turns=max_turns)
+    try:
+        mgr = goals.GoalManager.load_authoritative(
+            session_id=sid_key, default_max_turns=max_turns
+        )
+    except goals.GoalPersistenceError:
+        return _err(rid, 5031, goals.goal_status_failure_message())
     lower = arg.strip().lower()
     if not lower or lower == "status":
         return _exec_out(rid, mgr.status_line())
     if lower == "pause":
-        state = mgr.pause(reason="user-paused")
+        try:
+            state = mgr.pause(reason="user-paused")
+        except goals.GoalPersistenceError as exc:
+            return _err(rid, 5031, goals.goal_mutation_failure_message(exc))
         return _exec_out(rid, "No goal set." if state is None else f"⏸ Goal paused: {state.goal}")
     if lower == "resume":
-        state = mgr.resume()
+        try:
+            state = mgr.resume()
+        except goals.GoalPersistenceError as exc:
+            return _err(rid, 5031, goals.goal_mutation_failure_message(exc))
         if state is None:
             return _exec_out(rid, "No goal to resume.")
         # Resume must restart work: `exec` is display-only, so return a `send`; `display`
@@ -698,11 +709,16 @@ def _cmd_goal(rid, params, session, name, arg):
         return _ok(rid, {"type": "send", "notice": notice, "message": prompt, "display": "/goal resume"})
     if lower in {"clear", "stop", "done"}:
         had = mgr.has_goal()
-        mgr.clear()
+        try:
+            mgr.clear()
+        except goals.GoalPersistenceError as exc:
+            return _err(rid, 5031, goals.goal_mutation_failure_message(exc))
         return _exec_out(rid, "✓ Goal cleared." if had else "No active goal.")
     # Remaining text = new goal. Client renders `notice`, submits `message`; the post-turn judge takes over.
     try:
         state = mgr.set(arg)
+    except goals.GoalPersistenceError as exc:
+        return _err(rid, 5031, goals.goal_mutation_failure_message(exc))
     except ValueError as exc:
         return _err(rid, 4004, f"invalid goal: {exc}")
     notice = (

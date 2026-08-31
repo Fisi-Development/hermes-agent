@@ -100,6 +100,13 @@ def _attempt(label: str, errors, fn, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
     except errors as exc:
+        try:
+            from hermes_cli.goals import GoalPersistenceError, goal_mutation_failure_message
+            if isinstance(exc, GoalPersistenceError):
+                _cp(f"  {goal_mutation_failure_message(exc)}")
+                return _FAILED
+        except ImportError:
+            pass
         _cp(f"  {label}: {exc}")
         return _FAILED
 
@@ -2079,7 +2086,14 @@ class CLICommandsMixin:
     def _session_manager(self, getter, label: str):
         """The session-scoped manager from ``getter()``, or None after the standard dim
         "<label> unavailable (no active session)." line."""
-        mgr = getter()
+        try:
+            mgr = getter()
+        except Exception as exc:
+            from hermes_cli.goals import GoalPersistenceError, goal_status_failure_message
+            if isinstance(exc, GoalPersistenceError):
+                _cp(_dim_line(goal_status_failure_message()))
+                return None
+            raise
         if mgr is None:
             _cp(_dim_line(f"{label} unavailable (no active session)."))
         return mgr
@@ -2205,19 +2219,24 @@ class CLICommandsMixin:
                 return _cp("  Usage: /goal draft <objective in plain language>")
             self._handle_goal_draft(objective)
         elif lower == "pause":
-            state = mgr.pause(reason="user-paused")
+            state = _attempt("Goal update", RuntimeError, mgr.pause, reason="user-paused")
+            if state is _FAILED:
+                return
             _cp(f"  ⏸ Goal paused: {state.goal}" if state else _dim_line('No goal set.'))
         elif lower == "resume":
             self._goal_resume(mgr)
         elif lower in {"clear", "stop", "done"}:
             had = mgr.has_goal()
-            mgr.clear()
+            if _attempt("Goal update", RuntimeError, mgr.clear) is _FAILED:
+                return
             _cp("  ✓ Goal cleared." if had else _dim_line('No active goal.'))
         elif verb == "wait":
             self._goal_wait(mgr, rest)
         elif lower == "unwait":
-            _cp("  ▶ Wait barrier cleared — goal loop resumes." if mgr.stop_waiting()
-                else _dim_line('No wait barrier set.'))
+            cleared = _attempt("Goal update", RuntimeError, mgr.stop_waiting)
+            if cleared is not _FAILED:
+                _cp("  ▶ Wait barrier cleared — goal loop resumes." if cleared
+                    else _dim_line('No wait barrier set.'))
         elif verb == "gate":
             self._goal_gate(mgr, rest)
         else:
@@ -2238,7 +2257,9 @@ class CLICommandsMixin:
             return False
 
     def _goal_resume(self, mgr) -> None:
-        state = mgr.resume()
+        state = _attempt("Goal update", RuntimeError, mgr.resume)
+        if state is _FAILED:
+            return
         if state is None:
             return _cp(_dim_line('No goal to resume.'))
         _cp(f"  ▶ Goal resumed: {state.goal}")
@@ -2307,7 +2328,7 @@ class CLICommandsMixin:
         lines become a completion contract, the remaining prose the headline. Kicks the loop off."""
         from hermes_cli.goals import parse_contract
         headline, contract = parse_contract(arg)
-        state = _attempt("Invalid goal", ValueError, mgr.set, headline or arg,
+        state = _attempt("Invalid goal", (ValueError, RuntimeError), mgr.set, headline or arg,
                          contract=contract if not contract.is_empty() else None)
         if state is _FAILED:
             return
@@ -2339,7 +2360,7 @@ class CLICommandsMixin:
             import logging as _logging
             _logging.getLogger(__name__).debug("goal draft failed: %s", exc)
             contract = None
-        state = _attempt("Invalid goal", ValueError, mgr.set, objective, contract=contract)
+        state = _attempt("Invalid goal", (ValueError, RuntimeError), mgr.set, objective, contract=contract)
         if state is _FAILED:
             return
         self._print_goal_set(state, "Drafted completion contract:")

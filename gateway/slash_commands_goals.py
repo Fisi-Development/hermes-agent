@@ -28,6 +28,9 @@ def _mgr_call(prefix: str, fn, *args, errors=(RuntimeError, ValueError)):
     try:
         return fn(*args), None
     except errors as exc:
+        from hermes_cli.goals import GoalPersistenceError, goal_mutation_failure_message
+        if isinstance(exc, GoalPersistenceError):
+            return None, goal_mutation_failure_message(exc)
         return None, f"{prefix}: {exc}"
 
 
@@ -42,28 +45,51 @@ class GatewayGoalCommandsMixin:
         """
         args = (event.get_command_args() or "").strip()
         lower = args.lower()
-        mgr, _session_entry = await self._get_goal_manager_for_event(event)
+        from hermes_cli.goals import (
+            GoalPersistenceError,
+            goal_mutation_failure_message,
+            goal_status_failure_message,
+        )
+        try:
+            mgr, _session_entry = await self._get_goal_manager_for_event(event)
+        except GoalPersistenceError:
+            return goal_status_failure_message()
         if mgr is None:
             return t("gateway.goal.unavailable")
         if not args or lower == "status":
-            return mgr.status_line()
+            try:
+                return mgr.status_line()
+            except GoalPersistenceError:
+                return goal_status_failure_message()
         if lower == "show":
-            return f"{mgr.status_line()}\n{mgr.render_contract()}"
+            try:
+                return f"{mgr.status_line()}\n{mgr.render_contract()}"
+            except GoalPersistenceError:
+                return goal_status_failure_message()
         if lower == "unwait":
             return "▶ Wait barrier cleared — goal loop resumes." if mgr.stop_waiting() else "No wait barrier set."
         if lower in {"clear", "stop", "done"}:
             had = mgr.has_goal()
-            mgr.clear()
+            try:
+                mgr.clear()
+            except GoalPersistenceError as exc:
+                return goal_mutation_failure_message(exc)
             self._clear_goal_continuations(event, "clear")
             return t("gateway.goal_cleared") if had else t("gateway.no_active_goal")
         if lower == "pause":
-            state = mgr.pause(reason="user-paused")
+            try:
+                state = mgr.pause(reason="user-paused")
+            except GoalPersistenceError as exc:
+                return goal_mutation_failure_message(exc)
             if state is None:
                 return t("gateway.goal.no_goal_set")
             self._clear_goal_continuations(event, "pause")
             return t("gateway.goal.paused", goal=state.goal)
         if lower == "resume":
-            return self._goal_resume(mgr, event)
+            try:
+                return self._goal_resume(mgr, event)
+            except GoalPersistenceError as exc:
+                return goal_mutation_failure_message(exc)
         # Verb-prefixed forms take the remainder as their argument.
         for verb, handler in (("wait", self._goal_wait), ("gate", self._goal_gate)):
             if lower == verb or lower.startswith(verb + " "):
@@ -193,6 +219,9 @@ class GatewayGoalCommandsMixin:
             contract = parsed if not parsed.is_empty() else None
         try:
             state = mgr.set(args, contract=contract)
+        except GoalPersistenceError as exc:
+            from hermes_cli.goals import goal_mutation_failure_message
+            return goal_mutation_failure_message(exc)
         except ValueError as exc:
             return t("gateway.goal.invalid", error=str(exc))
 
