@@ -262,6 +262,37 @@ class SessionMessagesMixin:
             conn.execute(
                 f"UPDATE sessions SET message_count = message_count + {inc} WHERE id = ?", (*params, session_id))
 
+    def _record_todo_message_authority(
+        self, conn, *, message_id: int, session_id: str, role: str, content: Any,
+        tool_calls: Any, tool_call_id: Optional[str], tool_name: Optional[str],
+        display_kind: Optional[str], display_metadata: Any, timestamp: float,
+    ) -> None:
+        """Index durable Todo authority at the message persistence boundary."""
+        self._record_todo_pair_boundary(
+            conn, message_id=message_id, session_id=session_id, role=role,
+            content=content, tool_calls=tool_calls, tool_name=tool_name,
+            display_kind=display_kind, display_metadata=display_metadata,
+            timestamp=timestamp,
+        )
+        authority_json = self._todo_carrier_authority_json(
+            session_id=session_id, row_id=message_id, role=role, content=content,
+            tool_call_id=tool_call_id, tool_name=tool_name,
+            display_kind=display_kind, display_metadata=display_metadata,
+            timestamp=timestamp,
+        )
+        if authority_json is None:
+            authority_json = self._todo_tool_result_authority_json(
+                conn, session_id=session_id, row_id=message_id, role=role,
+                content=content, tool_call_id=tool_call_id, tool_name=tool_name,
+                display_kind=display_kind, display_metadata=display_metadata,
+                timestamp=timestamp,
+            )
+        if authority_json is not None:
+            self._store_todo_authority(
+                conn, message_id=message_id, session_id=session_id,
+                authority_json=authority_json,
+            )
+
     def append_message(
         self, session_id: str, role: str, content: str = None, tool_name: str = None, tool_calls: Any = None,
         tool_call_id: str = None, token_count: int = None, finish_reason: str = None, reasoning: str = None,
@@ -278,12 +309,19 @@ class SessionMessagesMixin:
         # Encode outside the write txn (display metadata first: log-order parity).
         msg["display_metadata"] = self._encode_display_metadata(display_metadata)
         tool_calls = _parse_tool_calls(tool_calls)
+        message_timestamp = _coerce_timestamp(timestamp, time.time())
         params = self._message_row_params(
-            session_id, role, msg, tool_calls, _coerce_timestamp(timestamp, time.time()), keep_reasoning=True)
+            session_id, role, msg, tool_calls, message_timestamp, keep_reasoning=True)
         def _do(conn):
             self._check_transcript_write_guards(conn, session_id, compression_lock_holder,
                 turn_lease_holder=turn_lease_holder, turn_lease_ttl_seconds=turn_lease_ttl_seconds)
             msg_id = conn.execute(_INSERT_MESSAGE_SQL, params).lastrowid
+            self._record_todo_message_authority(
+                conn, message_id=int(msg_id), session_id=session_id, role=role,
+                content=content, tool_calls=tool_calls, tool_call_id=tool_call_id,
+                tool_name=tool_name, display_kind=display_kind,
+                display_metadata=display_metadata, timestamp=message_timestamp,
+            )
             self._bump_session_counters(conn, session_id, 1, _tool_calls_count(tool_calls), unit=True)
             return msg_id
         # THE critical write (failure aborts the turn): long patience so a sibling legitimately
@@ -429,6 +467,13 @@ class SessionMessagesMixin:
             message_timestamp = _coerce_timestamp(msg.get("timestamp"), now_ts)
             cur = conn.execute(_INSERT_MESSAGE_SQL, self._message_row_params(
                 session_id, role, msg, tool_calls, message_timestamp, keep_reasoning=role == "assistant"))
+            self._record_todo_message_authority(
+                conn, message_id=int(cur.lastrowid), session_id=session_id, role=role,
+                content=msg.get("content"), tool_calls=tool_calls,
+                tool_call_id=msg.get("tool_call_id"), tool_name=msg.get("tool_name"),
+                display_kind=msg.get("display_kind"),
+                display_metadata=msg.get("display_metadata"), timestamp=message_timestamp,
+            )
             if cur.lastrowid is not None:
                 msg["_row_id"] = cur.lastrowid
             inserted += 1
