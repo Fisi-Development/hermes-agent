@@ -64,7 +64,7 @@ function chatWindowWebPreferences(preloadPath: string) {
 // onboarding overlays and the global session sidebar. `watch=1` marks a
 // spectator window (e.g. a running subagent's session): the renderer resumes it
 // lazily so the gateway never builds an agent just to stream into it.
-//  preserves the local-profile boot fallback;  carries
+// `profile` preserves the local-profile boot fallback; `ownerRoute` carries
 // the exact connection/profile identity for remote and multiplexed owners.
 function buildSessionWindowUrl(sessionId: string, { devServer, ownerRoute, profile, rendererIndexPath, watch }: any = {}) {
   const params = new URLSearchParams({ win: 'secondary' })
@@ -76,7 +76,7 @@ function buildSessionWindowUrl(sessionId: string, { devServer, ownerRoute, profi
   if (ownerRoute?.profile) params.set('ownerProfile', ownerRoute.profile)
   if (ownerRoute?.targetProfile) params.set('ownerTargetProfile', ownerRoute.targetProfile)
 
-  const query = 
+  const query = `?${params.toString()}`
   const route = `#/${encodeURIComponent(sessionId)}`
 
   if (devServer) {
