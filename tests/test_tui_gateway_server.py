@@ -59,7 +59,7 @@ def test_session_slot_is_claimed_on_first_turn_not_on_create(monkeypatch, tmp_pa
 
         # Opening a chat must NOT take a slot. Every tile paint and every
         # background reconnect-resume calls session.create, and an unprompted
-        # draft has no DB row and is filtered out of the sidebar — so a slot
+        # draft has no messages and is filtered out of the sidebar — so a slot
         # held here is invisible to the user while still starving the other
         # surfaces that share this cap.
         first = server._methods["session.create"]("r1", {"cols": 80})
@@ -3763,6 +3763,73 @@ def test_session_close_releases_resume_lock_before_slow_teardown(monkeypatch):
     assert response["result"] == {"closed": True}
 
 
+def test_draft_survives_ws_orphan_reap_and_resume(monkeypatch, tmp_path):
+    """A never-submitted Desktop draft remains resumable after WS reaping."""
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    callbacks = []
+
+    class _Timer:
+        def __init__(self, _delay, callback):
+            callbacks.append(callback)
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
+    monkeypatch.setattr(server, "_completion_cwd", lambda _params=None: str(tmp_path))
+    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
+    monkeypatch.setattr(server, "_schedule_session_cap_enforcement", lambda: None)
+    monkeypatch.setattr(server.threading, "Timer", _Timer)
+    monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 0.01)
+
+    response = server.handle_request(
+        {
+            "id": "create",
+            "method": "session.create",
+            "params": {"source": "desktop", "cwd": str(tmp_path)},
+        }
+    )
+    assert "error" not in response, response
+    sid = response["result"]["session_id"]
+    key = response["result"]["stored_session_id"]
+    resumed_sid = None
+
+    try:
+        # The durable identity must exist before any prompt is submitted.
+        assert db.get_session(key) is not None
+
+        server._sessions[sid]["transport"] = server._detached_ws_transport
+        server._schedule_ws_orphan_reap(sid)
+        assert callbacks
+        callbacks.pop(0)()
+        assert sid not in server._sessions
+
+        # Reaping ends the draft, but must not make the durable identity
+        # disappear; resume reopens it and installs a fresh live record.
+        ended = db.get_session(key)
+        assert ended is not None
+        assert ended["end_reason"] == "ws_orphan_reap"
+        resumed = server.handle_request(
+            {
+                "id": "resume",
+                "method": "session.resume",
+                "params": {"session_id": key, "source": "desktop"},
+            }
+        )
+        assert "error" not in resumed, resumed
+        assert resumed["result"]["session_key"] == key
+        assert resumed["result"]["message_count"] == 0
+        resumed_sid = resumed["result"]["session_id"]
+    finally:
+        server._sessions.pop(sid, None)
+        if resumed_sid:
+            server._sessions.pop(resumed_sid, None)
+        db.close()
+
+
 def test_ws_orphan_reap_closes_worker_when_session_stays_detached(monkeypatch):
     """A detached WS session past its grace window has its slash_worker closed.
 
@@ -5350,11 +5417,11 @@ def test_run_prompt_submit_prefers_origin_ui_session_id(monkeypatch, tmp_path):
 
 
 
-    """session.create must NOT eagerly write a DB row.
+def test_session_create_persists_empty_row(monkeypatch):
+    """session.create persists a durable identity before the first prompt.
 
-    Every TUI/desktop launch opens a session here just to paint the composer;
-    eagerly creating a row left an empty "Untitled" session behind for every
-    launch the user never typed into. The row is created lazily on first prompt.
+    Draft rows are hidden from the Desktop's message-bearing session list, but
+    retaining the identity lets a websocket orphan reap recover the draft.
     """
     created = []
 
@@ -5376,7 +5443,8 @@ def test_run_prompt_submit_prefers_origin_ui_session_id(monkeypatch, tmp_path):
     sid = resp["result"]["session_id"]
     try:
         assert resp["result"]["stored_session_id"]
-        assert created == [], "session.create should not persist an empty DB row"
+        assert len(created) == 1
+        assert created[0][0] == (resp["result"]["stored_session_id"],)
     finally:
         server._sessions.pop(sid, None)
 

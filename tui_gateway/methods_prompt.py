@@ -316,9 +316,10 @@ def _(rid, params: dict) -> dict:
             isolated_response["error"].get("message", "unknown error"),
         )
 
-    # Persist the DB row lazily, now that the user has actually sent a message.
-    # Disk-full must fail the RPC (not stream silently): desktop maps the error
-    # string to a "disk full" toast so the user knows why the send vanished.
+    # Ensure the DB row now that the user has actually sent a message. The row
+    # is normally created by session.create so a websocket orphan reap can
+    # recover an untouched draft; this retry also preserves the disk-full error
+    # contract for the first durable turn.
     try:
         _ensure_session_db_row(session)
         # A branch becomes real here: copy its parent's transcript into the row so it

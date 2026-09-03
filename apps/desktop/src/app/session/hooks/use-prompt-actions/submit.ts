@@ -568,11 +568,11 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         // A successful create re-homes selection + route to the chat it just
         // minted, so the pre-create baseline can't tell our own re-home from
         // a user switch (judging it drift aborted EVERY first send of a new
-        // chat: no prompt.submit, no DB row, a stranded route that 404s
-        // "Session not found"). The drift signal for this window is the
-        // active ref instead: every switch path re-nulls or retargets it
-        // synchronously, so it only still equals the id create returned when
-        // nobody re-homed since.
+        // chat: no prompt.submit, no durable transcript, a stranded route
+        // that used to 404 "Session not found"). The drift signal for this
+        // window is the active ref instead: every switch path re-nulls or
+        // retargets it synchronously, so it only still equals the id create
+        // returned when nobody re-homed since.
         if (activeSessionIdRef.current !== sessionId) {
           return abortForSessionSwitch(sessionId)
         }

@@ -535,13 +535,13 @@ def _ensure_active_session_slot(sid: str, session: dict) -> str | None:
     session.create / session.resume deliberately do NOT claim one. Every
     desktop tile paint, background reconnect-resume and abandoned draft opens a
     session just to paint a composer, and a slot held by one of those is
-    invisible everywhere: an unprompted draft has no DB row, and the sidebar
-    filters it out with min_messages=1. Idle desktop tabs therefore silently
-    starved the messaging gateway, which shares this cap — five parked tabs on
-    a websocket-flappy host locked a Discord bot out of a 5-slot cap while
-    running no agents at all. Claiming on the first turn mirrors the lazy
-    contract _ensure_session_db_row already uses for the row itself, and keeps
-    the invariant that anything holding a slot is something the user can see.
+    invisible in the Desktop's message-bearing sidebar query: an unprompted
+    draft has no messages and is filtered out with min_messages=1. Idle desktop
+    tabs therefore silently starved the messaging gateway, which shares this
+    cap — five parked tabs on a websocket-flappy host locked a Discord bot out
+    of a 5-slot cap while running no agents at all. Claiming on the first turn
+    keeps the invariant that anything holding a slot is something the user can
+    see.
     """
     if session.get("active_session_lease") is not None:
         return None
@@ -2725,12 +2725,13 @@ def _register_session_cwd(session: dict | None) -> None:
 
 
 def _ensure_session_db_row(session: dict) -> None:
-    """Idempotently persist the session's DB row on first real activity.
+    """Idempotently persist the session's DB row.
 
-    Called from prompt.submit so a row only exists once the user actually sends
-    a message — abandoned drafts never leave an empty "Untitled" session behind.
-    Uses INSERT OR IGNORE under the hood, so re-calls (and the AIAgent's own
-    lazy create) are no-ops.
+    ``session.create`` calls this before returning so a websocket orphan reap can
+    recover a draft that has not received a prompt yet. ``prompt.submit`` calls
+    it again as a retry/compatibility path. Empty draft rows have no messages and
+    are excluded from the Desktop's message-bearing session list; INSERT OR
+    IGNORE makes both calls safe, as well as the AIAgent's own lazy create.
 
     A cwd the user *chose* is always persisted. When they made no explicit
     choice the launch directory stands in, and whether that is meaningful

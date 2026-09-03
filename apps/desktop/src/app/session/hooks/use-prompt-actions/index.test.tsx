@@ -3710,8 +3710,8 @@ describe('usePromptActions submit session-context isolation (#54527)', () => {
     // legitimately sets selectedStoredSessionIdRef + navigates to the new
     // session's route. Comparing against the pre-create (null) baseline made
     // the guard read that self-inflicted move as a user switch and abort, so
-    // prompt.submit never fired: the message vanished, no DB row was ever
-    // persisted, and the desktop stranded on a route whose REST reads 404
+    // prompt.submit never fired: the message vanished, no durable transcript
+    // existed, and the desktop stranded on a route whose REST read 404
     // ("Session not found").
     const calls: { method: string; params?: Record<string, unknown> }[] = []
     const selectedStoredSessionIdRef: MutableRefObject<string | null> = { current: null }

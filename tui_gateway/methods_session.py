@@ -110,12 +110,20 @@ def _(rid, params: dict) -> dict:
         }
         _register_session_cwd(_sessions[sid])
 
-    # NOTE: we intentionally do NOT persist a DB row here. Every TUI/desktop
-    # launch (and every "New agent" / draft) opens a session here just to paint
-    # the composer, so eagerly creating a row left an "Untitled" empty session
-    # behind for every launch the user never typed into. The row is now created
-    # lazily on the first prompt (see _ensure_session_db_row + prompt.submit),
-    # and the AIAgent's own INSERT-OR-IGNORE persists it on the first turn too.
+    # Persist the durable identity before returning the draft. The websocket
+    # orphan reaper can reclaim this in-memory record before the first prompt
+    # (for example, while a remote backend is still building its agent); without
+    # a row, a later session.resume has no way to recover the draft. The helper
+    # is idempotent, profile-aware, and retains the first-prompt INSERT-OR-IGNORE
+    # fallback for transient persistence failures.
+    try:
+        _ensure_session_db_row(_sessions[sid])
+    except Exception:
+        # session.create remains a lightweight UI operation when state.db is
+        # temporarily unavailable. A later prompt retries the durable write,
+        # while the failure is visible in debug logs rather than breaking the
+        # composer response.
+        logger.debug("draft row persistence failed for %s", key, exc_info=True)
 
     # Return the lightweight session immediately so Ink can paint the composer
     # + skeleton panel, then build the real AIAgent just after this response is
