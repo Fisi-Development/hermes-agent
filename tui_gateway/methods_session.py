@@ -118,6 +118,11 @@ def _(rid, params: dict) -> dict:
     # fallback for transient persistence failures.
     try:
         _ensure_session_db_row(_sessions[sid])
+        # Desktop's stored-session branch path sends its copied transcript as
+        # seed history. Persist it before the first prompt as well: the WS
+        # orphan reaper can reclaim the draft before prompt.submit gets a
+        # chance to run, and the durable identity alone cannot restore context.
+        _persist_branch_seed(_sessions[sid])
     except Exception:
         # session.create remains a lightweight UI operation when state.db is
         # temporarily unavailable. A later prompt retries the durable write,

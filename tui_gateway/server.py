@@ -2233,8 +2233,10 @@ def _start_agent_build(sid: str, session: dict) -> None:
             finally:
                 _clear_session_context(tokens)
 
-            # Session DB row deferred to first run_conversation() call.
-            # pending_title applied post-first-message (see cli.exec handler).
+            # session.create normally persisted the row before this build; the
+            # agent's INSERT-OR-IGNORE remains a first-turn retry for transient
+            # failures and CLI-created sessions. pending_title is still applied
+            # post-first-message (see cli.exec handler).
             current["agent"] = agent
             # Baseline for the per-turn config sync; the profile home
             # override is still active here.
@@ -2858,13 +2860,15 @@ def _ensure_session_db_row(session: dict) -> None:
 
 
 def _persist_branch_seed(session: dict) -> None:
-    """First-turn persist of a branch's copied transcript.
+    """Persist a branch's copied transcript before its first prompt.
 
     A branch is a draft until its first submit: the parent's messages live only
     in ``session["history"]`` (they ride into the agent as ``conversation_history``,
     which ``_flush_messages_to_session_db`` skips by identity). Without this the
-    branch row would resume missing its pre-branch context. Runs once; the row +
-    parent link are written by ``_ensure_session_db_row`` just before this.
+    branch row would resume missing its pre-branch context. ``session.create``
+    calls this eagerly for stored-session branches, while ``prompt.submit``
+    retries it for compatibility. The row + parent link are written by
+    ``_ensure_session_db_row`` before either call.
     """
     if not session.get("parent_session_id") or session.get("_branch_seed_persisted"):
         return
@@ -7250,6 +7254,16 @@ def _coerce_seed_history(value: Any) -> list[dict]:
         return []
 
     history = []
+    preserved_fields = (
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details",
+        "codex_reasoning_items",
+        "codex_message_items",
+        "display_kind",
+        "display_metadata",
+        "timestamp",
+    )
     for item in value:
         if not isinstance(item, dict):
             continue
@@ -7264,7 +7278,11 @@ def _coerce_seed_history(value: Any) -> list[dict]:
         if not isinstance(content, str) or not content.strip():
             continue
 
-        history.append({"role": role, "content": content})
+        message = {"role": role, "content": content}
+        for field in preserved_fields:
+            if field in item:
+                message[field] = item[field]
+        history.append(message)
 
     return history
 

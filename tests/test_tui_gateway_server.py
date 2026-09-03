@@ -3830,6 +3830,93 @@ def test_draft_survives_ws_orphan_reap_and_resume(monkeypatch, tmp_path):
         db.close()
 
 
+def test_seeded_desktop_draft_survives_ws_orphan_reap_and_resume(monkeypatch, tmp_path):
+    """A seeded Desktop branch keeps its transcript through WS reaping."""
+    from hermes_state import SessionDB
+
+    seed = _branch_history()
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session("parent-key", source="desktop")
+    callbacks = []
+
+    class _Timer:
+        def __init__(self, _delay, callback):
+            callbacks.append(callback)
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
+    monkeypatch.setattr(server, "_completion_cwd", lambda _params=None: str(tmp_path))
+    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
+    monkeypatch.setattr(server, "_schedule_session_cap_enforcement", lambda: None)
+    monkeypatch.setattr(server.threading, "Timer", _Timer)
+
+    response = server.handle_request(
+        {
+            "id": "create-seeded",
+            "method": "session.create",
+            "params": {
+                "source": "desktop",
+                "cwd": str(tmp_path),
+                "parent_session_id": "parent-key",
+                "messages": seed,
+            },
+        }
+    )
+    assert "error" not in response, response
+    sid = response["result"]["session_id"]
+    key = response["result"]["stored_session_id"]
+    resumed_sid = None
+
+    try:
+        assert db.get_session(key)["message_count"] == len(seed)
+        server._sessions[sid]["transport"] = server._detached_ws_transport
+        server._schedule_ws_orphan_reap(sid)
+        assert callbacks
+        callbacks.pop(0)()
+        assert sid not in server._sessions
+
+        resumed = server.handle_request(
+            {
+                "id": "resume-seeded",
+                "method": "session.resume",
+                "params": {"session_id": key, "source": "desktop"},
+            }
+        )
+        assert "error" not in resumed, resumed
+        payload = resumed["result"]
+        resumed_sid = payload["session_id"]
+        assert payload["session_key"] == key
+        assert payload["message_count"] == len(server._history_to_messages(seed))
+
+        assistant = next(message for message in payload["messages"] if message["role"] == "assistant")
+        assert assistant["text"] == "done"
+        assert assistant["reasoning"] == BRANCH_REASONING
+        assert assistant["reasoning_content"] == BRANCH_REASONING_CONTENT
+        assert assistant["reasoning_details"] == BRANCH_REASONING_DETAILS
+        assert assistant["codex_reasoning_items"] == BRANCH_CODEX_REASONING_ITEMS
+
+        stored_messages = db.get_messages_as_conversation(key)
+        stored_assistant = next(message for message in stored_messages if message["role"] == "assistant")
+        assert stored_assistant["reasoning"] == BRANCH_REASONING
+        assert stored_assistant["reasoning_content"] == BRANCH_REASONING_CONTENT
+        assert stored_assistant["reasoning_details"] == BRANCH_REASONING_DETAILS
+        assert stored_assistant["codex_reasoning_items"] == BRANCH_CODEX_REASONING_ITEMS
+        marker = next(
+            message
+            for message in stored_messages
+            if message.get("display_kind") == "personality_switch"
+        )
+        assert marker["content"] == "[System: personality changed]"
+    finally:
+        server._sessions.pop(sid, None)
+        if resumed_sid:
+            server._sessions.pop(resumed_sid, None)
+        db.close()
+
+
 def test_ws_orphan_reap_closes_worker_when_session_stays_detached(monkeypatch):
     """A detached WS session past its grace window has its slash_worker closed.
 
