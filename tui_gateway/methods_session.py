@@ -194,6 +194,7 @@ def _(rid, params: dict) -> dict:
                 for s in db.list_sessions_rich(
                     source=None,
                     limit=fetch_limit,
+                    min_message_count=1,
                     order_by_last_active=True,
                     compact_rows=True,
                 )
@@ -247,7 +248,11 @@ def _(rid, params: dict) -> dict:
             # "no eligible session" answer.  ``session.list`` uses a
             # similar over-fetch strategy.
             rows = db.list_sessions_rich(
-                source=None, limit=200, order_by_last_active=True, compact_rows=True
+                source=None,
+                limit=200,
+                min_message_count=1,
+                order_by_last_active=True,
+                compact_rows=True,
             )
             for row in rows:
                 src = (row.get("source") or "").strip().lower()

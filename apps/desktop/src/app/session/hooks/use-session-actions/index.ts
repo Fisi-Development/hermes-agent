@@ -487,9 +487,9 @@ export function useSessionActions({
    *  Used by the New session row's "Open in split" menu and the tab-strip "+".
    *
    *  `listed` (default true) controls sidebar visibility. A brand-new backend
-   *  session is IN-MEMORY only until its first turn persists a row, so
-   *  `listSessions(min_messages=1)` already hides an unused one — the sidebar
-   *  pollution comes solely from the optimistic upsert here. The tab-strip "+"
+   *  session has a durable empty row now, but `listSessions(min_messages=1)`
+   *  keeps it out of the message-bearing list — sidebar pollution comes solely
+   *  from the optimistic upsert here. The tab-strip "+"
    *  passes `listed: false` so an unused new tab never clutters the session
    *  list (Cursor-style draft tab); it surfaces on the next refresh once the
    *  first message persists a turn. "Open in split" keeps the listed behavior. */

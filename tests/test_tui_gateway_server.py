@@ -11383,6 +11383,53 @@ def test_session_list_returns_clean_error_when_state_db_is_unavailable(monkeypat
     assert "state.db unavailable: locking protocol" in resp["error"]["message"]
 
 
+def test_session_list_excludes_empty_desktop_drafts(monkeypatch):
+    """Durable new-tab rows stay out of the human conversation picker."""
+    seen: dict = {}
+
+    class _DB:
+        def list_sessions_rich(self, **kwargs):
+            seen.update(kwargs)
+            rows = [
+                {
+                    "id": "draft-1",
+                    "source": "desktop",
+                    "title": "",
+                    "preview": "",
+                    "started_at": 100,
+                    "message_count": 0,
+                },
+                {
+                    "id": "conversation-1",
+                    "source": "tui",
+                    "title": "Real conversation",
+                    "preview": "hello",
+                    "started_at": 99,
+                    "message_count": 1,
+                },
+            ]
+            minimum = kwargs.get("min_message_count", 0)
+            return [row for row in rows if row["message_count"] >= minimum]
+
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+
+    resp = server.handle_request(
+        {"id": "1", "method": "session.list", "params": {"limit": 5}}
+    )
+
+    assert resp["result"]["sessions"] == [
+        {
+            "id": "conversation-1",
+            "title": "Real conversation",
+            "preview": "hello",
+            "started_at": 99,
+            "message_count": 1,
+            "source": "tui",
+        }
+    ]
+    assert seen["min_message_count"] == 1
+
+
 # --------------------------------------------------------------------------
 # session.delete — TUI resume picker `d` key
 # --------------------------------------------------------------------------
@@ -12908,11 +12955,49 @@ def test_session_activate_can_omit_duplicate_desktop_transcript(monkeypatch):
 # ── session.most_recent ──────────────────────────────────────────────
 
 
+def test_session_most_recent_excludes_empty_desktop_drafts(monkeypatch):
+    """Auto-resume must skip durable drafts with no transcript messages."""
+    seen: dict = {}
+
+    class _DB:
+        def list_sessions_rich(self, **kwargs):
+            seen.update(kwargs)
+            rows = [
+                {
+                    "id": "draft-1",
+                    "source": "desktop",
+                    "title": "",
+                    "started_at": 100,
+                    "message_count": 0,
+                },
+                {
+                    "id": "conversation-1",
+                    "source": "tui",
+                    "title": "Real conversation",
+                    "started_at": 99,
+                    "message_count": 1,
+                },
+            ]
+            minimum = kwargs.get("min_message_count", 0)
+            return [row for row in rows if row["message_count"] >= minimum]
+
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+
+    resp = server.handle_request(
+        {"id": "1", "method": "session.most_recent", "params": {}}
+    )
+
+    assert resp["result"]["session_id"] == "conversation-1"
+    assert resp["result"]["title"] == "Real conversation"
+    assert resp["result"]["source"] == "tui"
+    assert seen["min_message_count"] == 1
+
+
 def test_session_most_recent_returns_first_non_denied(monkeypatch):
     """Drops `tool` rows like session.list does, returns the first hit."""
 
     class _DB:
-        def list_sessions_rich(self, *, source=None, limit=200, order_by_last_active=False, compact_rows=False):
+        def list_sessions_rich(self, *, source=None, limit=200, order_by_last_active=False, compact_rows=False, min_message_count=0):
             return [
                 {"id": "tool-1", "source": "tool", "title": "noise", "started_at": 100},
                 {"id": "tui-1", "source": "tui", "title": "real", "started_at": 99},
@@ -12931,7 +13016,7 @@ def test_session_most_recent_returns_first_non_denied(monkeypatch):
 
 def test_session_most_recent_returns_null_when_only_tool_rows(monkeypatch):
     class _DB:
-        def list_sessions_rich(self, *, source=None, limit=200, order_by_last_active=False, compact_rows=False):
+        def list_sessions_rich(self, *, source=None, limit=200, order_by_last_active=False, compact_rows=False, min_message_count=0):
             return [{"id": "tool-1", "source": "tool", "started_at": 1}]
 
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
@@ -12949,7 +13034,7 @@ def test_session_most_recent_folds_db_exception_into_null_result(monkeypatch):
     'no answer' (Copilot review on #17130)."""
 
     class _BrokenDB:
-        def list_sessions_rich(self, *, source=None, limit=200, order_by_last_active=False, compact_rows=False):
+        def list_sessions_rich(self, *, source=None, limit=200, order_by_last_active=False, compact_rows=False, min_message_count=0):
             raise RuntimeError("db locked")
 
     monkeypatch.setattr(server, "_get_db", lambda: _BrokenDB())
