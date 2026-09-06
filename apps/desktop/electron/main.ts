@@ -4266,17 +4266,17 @@ async function forceReleaseInstallHoldersForUpdate(updateRoot: string) {
         return stopped ? { kind: 'terminated' } : { kind: 'failed', detail: 'plugin service unit not stopped' }
       }
 
-      // Restart Manager named a file this process holds: let the script
-      // re-prove that ownership. A scanner-only holder has no such file, and
-      // the script treats a missing pair as "no resource claim" rather than
-      // failing on a claim it cannot verify.
-      const proveResource = holder.source === 'restart-manager' || Boolean(holder.resource)
-
+      // Every holder carries the install root: the script proves the target's
+      // executable (and each descendant's) lives under it before anything is
+      // assigned to the kill job. Without the claim a scanner-only holder was
+      // killed on pid + creation time alone (2026-09-06 review, P0-1). When
+      // Restart Manager also named a file this process holds, the script
+      // re-proves that ownership from `holder.resource`.
       return terminateWindowsHolderWithinDeadline(holder, {
         budgetMs,
         deadlineAt: deadlineAt ?? Date.now(),
         signal,
-        ...(proveResource ? { installRoot: updateRoot } : {})
+        installRoot: updateRoot
       })
     }
   })

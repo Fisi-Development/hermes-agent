@@ -1940,7 +1940,12 @@ Start-Sleep -Seconds 20
               timeoutMs: 5_000,
               waitMs: 1_500,
               buildScript: (pid, createdAt, waitMs) =>
-                buildExactTerminateScript(pid, createdAt, waitMs, { forcePrimarySnapshotFailure: true })
+                buildExactTerminateScript(pid, createdAt, waitMs, {
+                  forcePrimarySnapshotFailure: true,
+                  // The image-under-root proof is unconditional; this tree is
+                  // powershell.exe under the Windows directory.
+                  installRoot: process.env.SystemRoot || 'C:\\Windows'
+                })
             }
           )
         } finally {
@@ -2092,6 +2097,7 @@ Start-Sleep -Seconds 30
                   ...process.env,
                   HERMES_TERMINATE_SCRIPT: buildExactTerminateScript(rootPid, rootCreatedAt, 1_500, {
                     forcePrimarySnapshotFailure: true,
+                    installRoot: process.env.SystemRoot || 'C:\\Windows',
                     pausePhase: phase,
                     pausePid: writerPid,
                     phaseMarkerPath: phaseMarker
@@ -2368,6 +2374,7 @@ Start-Sleep -Seconds 30
           runPromise = runPowerShellWithHardBoundary(
             buildExactTerminateScript(rootPid, rootCreatedAt, 1_500, {
               forcePrimarySnapshotFailure: true,
+              installRoot: process.env.SystemRoot || 'C:\\Windows',
               pausePhase: phase,
               pausePid: writerPid,
               phaseMarkerPath: phaseMarker

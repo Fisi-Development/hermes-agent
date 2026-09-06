@@ -2591,6 +2591,7 @@ $handles = @{}
 $suspended = New-Object 'System.Collections.Generic.List[int]'
 $contained = New-Object 'System.Collections.Generic.HashSet[int]'
 $degraded = New-Object 'System.Collections.Generic.List[int]'
+$foreign = New-Object 'System.Collections.Generic.List[int]'
 $success = $false
 $exitCode = 1
 $fallbackSnapshotUsed = $false
@@ -2702,25 +2703,35 @@ try {
     if ($rootOpenError -eq 0x10001) { throw ("CREATE_TIME_MISMATCH root=" + $pidTarget) }
     throw ('HOLDER_OPEN_FAILED win32=' + $rootOpenError)
   }
-  if (-not [string]::IsNullOrWhiteSpace($installRootClaim) -or -not [string]::IsNullOrWhiteSpace($resourceClaim)) {
-    if ([string]::IsNullOrWhiteSpace($installRootClaim) -or [string]::IsNullOrWhiteSpace($resourceClaim)) {
-      throw 'TERMINATION_AUTHORIZATION_CLAIM_INCOMPLETE'
-    }
-    $installRootFinal = [HermesForceReleaseNative]::ReadFinalPath($installRootClaim)
+  # The executable-under-install-root proof is unconditional: pid + creation
+  # time alone never authorize a kill. A scanner-only holder used to reach
+  # this script without an install-root claim and skipped this whole block,
+  # so any process whose argv merely mentioned the venv was terminated with
+  # its entire descendant tree (2026-09-06 review, P0-1).
+  if ([string]::IsNullOrWhiteSpace($installRootClaim)) {
+    throw 'TERMINATION_AUTHORIZATION_CLAIM_MISSING'
+  }
+  $installRootFinal = [HermesForceReleaseNative]::ReadFinalPath($installRootClaim)
+  if ([string]::IsNullOrWhiteSpace($installRootFinal)) {
+    throw 'TERMINATION_FINAL_PATH_UNAVAILABLE'
+  }
+  $imagePath = [HermesForceReleaseNative]::ReadImagePath($rootHandle)
+  $imageFinal = [HermesForceReleaseNative]::ReadFinalPath($imagePath)
+  if ([string]::IsNullOrWhiteSpace($imageFinal)) {
+    throw 'TERMINATION_EXECUTABLE_IDENTITY_UNAVAILABLE'
+  }
+  if (-not [HermesForceReleaseNative]::IsSameOrUnderRoot($imageFinal, $installRootFinal)) {
+    throw 'TERMINATION_EXECUTABLE_OUTSIDE_INSTALL_ROOT'
+  }
+  # Only the Restart Manager ownership re-proof stays conditional: a
+  # scanner-only holder names no file it holds.
+  if (-not [string]::IsNullOrWhiteSpace($resourceClaim)) {
     $resourceFinal = [HermesForceReleaseNative]::ReadFinalPath($resourceClaim)
-    if ([string]::IsNullOrWhiteSpace($installRootFinal) -or [string]::IsNullOrWhiteSpace($resourceFinal)) {
+    if ([string]::IsNullOrWhiteSpace($resourceFinal)) {
       throw 'TERMINATION_FINAL_PATH_UNAVAILABLE'
     }
     if (-not [HermesForceReleaseNative]::IsSameOrUnderRoot($resourceFinal, $installRootFinal)) {
       throw 'TERMINATION_RESOURCE_OUTSIDE_INSTALL_ROOT'
-    }
-    $imagePath = [HermesForceReleaseNative]::ReadImagePath($rootHandle)
-    $imageFinal = [HermesForceReleaseNative]::ReadFinalPath($imagePath)
-    if ([string]::IsNullOrWhiteSpace($imageFinal)) {
-      throw 'TERMINATION_EXECUTABLE_IDENTITY_UNAVAILABLE'
-    }
-    if (-not [HermesForceReleaseNative]::IsSameOrUnderRoot($imageFinal, $installRootFinal)) {
-      throw 'TERMINATION_EXECUTABLE_OUTSIDE_INSTALL_ROOT'
     }
     if (-not [HermesForceReleaseNative]::IsCurrentResourceOwner($resourceFinal, $pidTarget, $expectedUnix)) {
       throw 'TERMINATION_CURRENT_LOCK_OWNERSHIP_MISMATCH'
@@ -2767,6 +2778,16 @@ try {
         if ($childOpenError -eq 0x10001) { throw ("CREATE_TIME_MISMATCH child=" + $childPid) }
         throw ('TREE_OPEN_FAILED win32=' + $childOpenError)
       }
+      # A descendant is authorized by the same executable-under-install-root
+      # proof as the root. A foreign image (the gateway's terminal tool ran an
+      # editor, git, or a user shell) is never assigned to the job: it stays
+      # alive, its subtree is not walked, and it is reported.
+      $childImageFinal = [HermesForceReleaseNative]::ReadFinalPath([HermesForceReleaseNative]::ReadImagePath($childHandle))
+      if ([string]::IsNullOrWhiteSpace($childImageFinal) -or -not [HermesForceReleaseNative]::IsSameOrUnderRoot($childImageFinal, $installRootFinal)) {
+        [HermesForceReleaseNative]::CloseHandle($childHandle) | Out-Null
+        [void]$foreign.Add($childPid)
+        continue
+      }
       $handles[[string]$childPid] = $childHandle
       if (Assign-ContainedProcess $childHandle $childPid) { [void]$contained.Add($childPid) }
       Pause-BoundaryTest 'after-child-assignment' $childPid
@@ -2811,6 +2832,7 @@ try {
   $exitCode = 0
   Write-Output 'TERMINATED'
   if ($degraded.Count -gt 0) { Write-Output ('CONTAINMENT_DEGRADED pids=' + ($degraded -join ',')) }
+  if ($foreign.Count -gt 0) { Write-Output ('FOREIGN_DESCENDANTS_LEFT_ALIVE pids=' + ($foreign -join ',')) }
 } catch {
   $message = [string]$_.Exception.Message
   # Elevation is authorized only when opening the exact authenticated holder
