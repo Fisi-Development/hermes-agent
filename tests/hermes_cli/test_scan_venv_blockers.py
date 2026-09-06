@@ -2821,3 +2821,94 @@ def test_live_plugin_service_proof_still_refuses_generation_change(
     monkeypatch.setattr(scanner, "_desktop_plugin_service_host", lambda _wrapper, _script: host)
 
     assert scanner._live_desktop_plugin_service_process(root, 20) is None
+
+
+# ---------------------------------------------------------------------------
+# Process-name gate on the argv/cwd holder rungs (2026-09-06 review, P0-1)
+#
+# The fork's detector dropped upstream's name gate, so ANY image whose argv
+# merely mentioned the venv path (a shell that ran activate, an editor opened
+# on pyvenv.cfg, a grep) became a "holder" that the Desktop force-released
+# together with its whole descendant tree. The argv/cwd rungs now apply only
+# to interpreter and launcher images; exe-under-venv matches are unchanged.
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CARRIER_SCANNER = (
+    REPO_ROOT / "apps" / "desktop" / "resources" / "update-scanner" / "scan-venv-blockers.py"
+)
+
+
+def _load_carrier_detector():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_carrier_scan_venv_blockers", CARRIER_SCANNER)
+    module = importlib.util.module_from_spec(spec)
+    # dataclass processing looks the module up by name during exec.
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
+    return module._detect_venv_python_processes
+
+
+def _holder_block(source: str) -> str:
+    start = source.index(
+        "        is_holder = exe_norm.startswith(venv_prefix) or exe_norm.startswith(managed_prefix)"
+    )
+    end = source.index("        if is_holder:", start)
+    return source[start:end]
+
+
+def _name_gate_process_table(root: Path):
+    venv_python = root / "venv" / "Scripts" / "python.exe"
+    foreign_python = Path("C:/Users/u/AppData/Local/uv/python/cpython-3.11/python.exe")
+    activate = root / "venv" / "Scripts" / "activate"
+    return [
+        # Foreign images whose argv/cwd merely mention the install: not holders.
+        _detector_proc(601, "C:/Program Files/PowerShell/7/pwsh.exe", "pwsh.exe", ["pwsh.exe", "-NoExit", str(activate)], cwd=str(root)),
+        _detector_proc(602, "C:/Program Files/VS Code/Code.exe", "Code.exe", ["Code.exe", str(root / "venv" / "pyvenv.cfg")]),
+        _detector_proc(603, "C:/tools/rg.exe", "rg.exe", ["rg.exe", "hermes_cli.main", str(root)], cwd=str(root)),
+        _detector_proc(604, "C:/Program Files/nodejs/node.exe", "node.exe", ["node.exe", "-m", "agent.transports.hermes_tools_mcp_server"], cwd=str(root)),
+        # Interpreter/launcher images matched by argv: still holders.
+        _detector_proc(701, str(foreign_python), "python.exe", [str(foreign_python), "-c", f"import runpy; runpy.run_path(r'{venv_python}')"]),
+        _detector_proc(702, "C:/Users/u/.local/bin/uv.exe", "uv.exe", ["uv.exe", "run", "python", "-m", "hermes_cli.main", "gateway", "run"], cwd=str(root)),
+        _detector_proc(703, str(foreign_python), "pythonw.exe", [str(foreign_python), "-m", "agent.transports.hermes_tools_mcp_server"], cwd=str(root)),
+        # Name unreadable: the image basename stands in for it.
+        _detector_proc(704, str(foreign_python), "", [str(foreign_python), "-m", "hermes_cli.main", "cron", "run"], cwd=str(root)),
+        # Exe under the venv is a holder regardless of argv (unchanged rung).
+        _detector_proc(801, str(venv_python), "python.exe", [str(venv_python), "-c", "pass"]),
+    ]
+
+
+def _fake_psutil_for(table):
+    return types.SimpleNamespace(process_iter=lambda _attrs: iter(list(table)))
+
+
+@pytest.mark.parametrize("copy", ["hermes_cli", "carrier"])
+def test_detector_argv_rungs_require_an_interpreter_or_launcher_image(
+    monkeypatch, tmp_path: Path, copy: str
+) -> None:
+    import hermes_cli.update_cmd as update_cmd
+
+    detect = update_cmd._detect_venv_python_processes if copy == "hermes_cli" else _load_carrier_detector()
+    monkeypatch.setitem(sys.modules, "psutil", _fake_psutil_for(_name_gate_process_table(tmp_path)))
+
+    matched = {pid for pid, _name, _cmdline in detect(root=tmp_path, strict=True)}
+
+    assert matched == {701, 702, 703, 704, 801}
+    assert matched.isdisjoint({601, 602, 603, 604})
+
+
+def test_carrier_and_hermes_cli_holder_blocks_are_textually_identical() -> None:
+    import hermes_cli.update_cmd as update_cmd
+
+    carrier_block = _holder_block(CARRIER_SCANNER.read_text(encoding="utf-8"))
+    hermes_block = _holder_block(Path(update_cmd.__file__).read_text(encoding="utf-8"))
+
+    assert carrier_block == hermes_block
+    assert "interpreter_like" in carrier_block
+    # Every argv/cwd rung is gated; only the exe-root rung is unconditional.
+    assert carrier_block.count("if not is_holder and interpreter_like and") == 3
+    assert "if not is_holder and venv_prefix in cmdline.lower()" not in carrier_block
