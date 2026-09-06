@@ -55,6 +55,7 @@ $ErrorActionPreference = 'Stop'
 $commandLine = [Environment]::GetEnvironmentVariable('HERMES_TEST_WMI_COMMAND_LINE')
 $startup = ([wmiclass]'Win32_ProcessStartup').CreateInstance()
 $startup.ShowWindow = 0 # SW_HIDE; CREATE_NO_WINDOW is rejected by this WMI provider.
+$startup.CreateFlags = 0x01000000 # CREATE_BREAKAWAY_FROM_JOB
 $result = ([wmiclass]'Win32_Process').Create($commandLine, $null, $startup)
 if ($null -eq $result -or [int]$result.ReturnValue -ne 0) {
   $returnValue = if ($null -eq $result) { -1 } else { [int]$result.ReturnValue }
@@ -2012,6 +2013,7 @@ Start-Sleep -Seconds 20
       for (const phase of phases) {
         const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `hermes-force-helper-death-${phase}-`))
         const sentinel = path.join(tmp, 'sentinel.txt')
+        const releasePath = path.join(tmp, 'release')
         const rootPidPath = path.join(tmp, 'root.pid')
         const writerPidPath = path.join(tmp, 'writer.pid')
         const phaseMarker = path.join(tmp, 'phase.marker')
@@ -2029,23 +2031,22 @@ Start-Sleep -Seconds 20
         const rootScript = `
 $ErrorActionPreference = 'Stop'
 $sentinel = ${quotePowerShellLiteral(sentinel)}
+$releasePath = ${quotePowerShellLiteral(releasePath)}
 $rootPidPath = ${quotePowerShellLiteral(rootPidPath)}
 $writerPidPath = ${quotePowerShellLiteral(writerPidPath)}
 Set-Content -LiteralPath $rootPidPath -Value ([string]$PID)
 $writer = Start-Process -FilePath ${quotePowerShellLiteral(ps)} -ArgumentList @(
   '-NoLogo','-NoProfile','-NonInteractive','-Command',
-  ('Start-Sleep -Milliseconds 6000; Set-Content -LiteralPath ''' + $sentinel + ''' -Value LATE_MUTATION')
+  ('while (-not (Test-Path -LiteralPath ''' + $releasePath + ''')) { Start-Sleep -Milliseconds 25 }; Set-Content -LiteralPath ''' + $sentinel + ''' -Value LATE_MUTATION')
 ) -PassThru -WindowStyle Hidden
 Set-Content -LiteralPath $writerPidPath -Value ([string]$writer.Id)
 Start-Sleep -Seconds 30
 `.trim()
 
-        const rootChild = execFile(
-          ps,
-          ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', rootScript],
-          { encoding: 'utf8', windowsHide: true },
-          () => undefined
-        )
+        // Launch outside Vitest's inherited job. Otherwise Windows can reject
+        // assignment to the named target job, and helper death cannot exercise
+        // its kill-on-close boundary.
+        await launchPowerShellThroughWmi(ps, rootScript)
 
         let rootPid: number | undefined
         let writerPid: number | undefined
@@ -2096,7 +2097,6 @@ Start-Sleep -Seconds 30
                 env: {
                   ...process.env,
                   HERMES_TERMINATE_SCRIPT: buildExactTerminateScript(rootPid, rootCreatedAt, 1_500, {
-                    forcePrimarySnapshotFailure: true,
                     installRoot: process.env.SystemRoot || 'C:\\Windows',
                     pausePhase: phase,
                     pausePid: writerPid,
@@ -2247,7 +2247,8 @@ Start-Sleep -Seconds 30
             [],
             `${phase}: target survived helper death boundaryPid=${boundaryPid} targetJob=${targetJobName} details=${survivorDetails}`
           )
-          await new Promise(resolve => setTimeout(resolve, 6_500))
+          fs.writeFileSync(releasePath, 'release')
+          await new Promise(resolve => setTimeout(resolve, 500))
           assert.equal(fs.existsSync(sentinel), false, `${phase}: delayed writer mutated after helper death`)
           assert.deepEqual(await identitiesStillPresent(identities), [], `${phase}: target generation reappeared`)
         } finally {
@@ -2275,12 +2276,6 @@ Start-Sleep -Seconds 30
           }
 
           fs.rmSync(`${phaseMarker}.tmp`, { force: true })
-
-          try {
-            rootChild.kill('SIGKILL')
-          } catch {
-            void 0
-          }
 
           fs.rmSync(tmp, { recursive: true, force: true })
         }
@@ -2311,6 +2306,7 @@ Start-Sleep -Seconds 30
       for (const phase of phases) {
         const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `hermes-force-production-helper-death-${phase}-`))
         const sentinel = path.join(tmp, 'sentinel.txt')
+        const releasePath = path.join(tmp, 'release')
         const rootPidPath = path.join(tmp, 'root.pid')
         const writerPidPath = path.join(tmp, 'writer.pid')
         const phaseMarker = path.join(tmp, 'phase.marker')
@@ -2320,23 +2316,22 @@ Start-Sleep -Seconds 30
         const rootScript = `
 $ErrorActionPreference = 'Stop'
 $sentinel = ${quotePowerShellLiteral(sentinel)}
+$releasePath = ${quotePowerShellLiteral(releasePath)}
 $rootPidPath = ${quotePowerShellLiteral(rootPidPath)}
 $writerPidPath = ${quotePowerShellLiteral(writerPidPath)}
 Set-Content -LiteralPath $rootPidPath -Value ([string]$PID)
 $writer = Start-Process -FilePath ${quotePowerShellLiteral(ps)} -ArgumentList @(
   '-NoLogo','-NoProfile','-NonInteractive','-Command',
-  ('Start-Sleep -Milliseconds 6000; Set-Content -LiteralPath ''' + $sentinel + ''' -Value LATE_MUTATION')
+  ('while (-not (Test-Path -LiteralPath ''' + $releasePath + ''')) { Start-Sleep -Milliseconds 25 }; Set-Content -LiteralPath ''' + $sentinel + ''' -Value LATE_MUTATION')
 ) -PassThru -WindowStyle Hidden
 Set-Content -LiteralPath $writerPidPath -Value ([string]$writer.Id)
 Start-Sleep -Seconds 30
 `.trim()
 
-        const rootChild = execFile(
-          ps,
-          ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', rootScript],
-          { encoding: 'utf8', windowsHide: true },
-          () => undefined
-        )
+        // The production boundary handles an external holder. Launching this
+        // tree from Vitest inherits the harness job and can make assignment to
+        // the target job degrade with ERROR_ACCESS_DENIED.
+        await launchPowerShellThroughWmi(ps, rootScript)
 
         const controller = new AbortController()
         let runPromise: Promise<{ stdout: string; stderr: string; code: number; pid?: number }> | undefined
@@ -2373,7 +2368,6 @@ Start-Sleep -Seconds 30
           process.env.HERMES_TERMINATE_NAMED_JOB_LOG = namedJobLog
           runPromise = runPowerShellWithHardBoundary(
             buildExactTerminateScript(rootPid, rootCreatedAt, 1_500, {
-              forcePrimarySnapshotFailure: true,
               installRoot: process.env.SystemRoot || 'C:\\Windows',
               pausePhase: phase,
               pausePid: writerPid,
@@ -2413,7 +2407,8 @@ Start-Sleep -Seconds 30
             [],
             `${phase}: target survived production helper death root=${rootPid} writer=${writerPid} boundary=${JSON.stringify(boundaryResult)} watcher=${watcherDiagnostics} namedJob=${namedJobDiagnostics}`
           )
-          await new Promise(resolve => setTimeout(resolve, 6_500))
+          fs.writeFileSync(releasePath, 'release')
+          await new Promise(resolve => setTimeout(resolve, 500))
           assert.equal(fs.existsSync(sentinel), false, `${phase}: delayed writer mutated after helper death`)
           assert.deepEqual(await identitiesStillPresent(identities), [], `${phase}: target generation reappeared`)
         } finally {
@@ -2445,12 +2440,6 @@ Start-Sleep -Seconds 30
 
           if (savedEnvironment.namedJobLog == null) {delete process.env.HERMES_TERMINATE_NAMED_JOB_LOG}
           else {process.env.HERMES_TERMINATE_NAMED_JOB_LOG = savedEnvironment.namedJobLog}
-
-          try {
-            rootChild.kill('SIGKILL')
-          } catch {
-            void 0
-          }
 
           fs.rmSync(tmp, { recursive: true, force: true })
         }

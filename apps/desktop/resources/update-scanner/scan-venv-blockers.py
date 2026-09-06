@@ -937,16 +937,14 @@ def _detect_venv_python_processes(
             raise RuntimeError(f"process {numeric_pid} ({name}) identity metadata was unreadable")
         process_rows.append({"pid": numeric_pid, "ppid": info.get("ppid"), "exe": str(exe or ""), "exe_norm": exe_norm, "name": name, "argv": argv, "cmdline": cmdline})
         is_holder = exe_norm.startswith(venv_prefix) or exe_norm.startswith(managed_prefix)
-        # The argv/cwd rungs below identify interpreter and launcher images
-        # only (upstream's process-name gate: python*/pypy*/uv/uvx/hermes).
-        # Any other image whose argv merely mentions the venv or the install
-        # root -- an editor, a shell that ran activate, a grep -- is not a
-        # holder and must never become a force-release target (P0-1).
+        # Only interpreter/launcher images can qualify from argv or cwd;
+        # an editor or shell can mention this install without owning it.
         name_low = (name or _process_basename(exe or "")).lower()
         interpreter_like = name_low.startswith(("python", "pypy")) or name_low in {"uv.exe", "uvx.exe", "hermes.exe"}
-        if not is_holder and interpreter_like and venv_prefix in cmdline.lower():
+        cmdline_low = cmdline.lower()
+        if not is_holder and interpreter_like and venv_prefix in cmdline_low:
             is_holder = True
-        if not is_holder and interpreter_like and "hermes_cli.main" in cmdline.lower() and (root_prefix in cmdline.lower() or cwd_low.startswith(root_prefix)):
+        if not is_holder and interpreter_like and "hermes_cli.main" in cmdline_low and (root_prefix in cmdline_low or cwd_low.startswith(root_prefix)):
             is_holder = True
         if not is_holder and interpreter_like and cwd_low.startswith(root_prefix) and is_exact_mcp_module_argv(argv):
             is_holder = True

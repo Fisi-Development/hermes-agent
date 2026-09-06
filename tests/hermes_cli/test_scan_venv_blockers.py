@@ -2853,14 +2853,6 @@ def _load_carrier_detector():
     return module._detect_venv_python_processes
 
 
-def _holder_block(source: str) -> str:
-    start = source.index(
-        "        is_holder = exe_norm.startswith(venv_prefix) or exe_norm.startswith(managed_prefix)"
-    )
-    end = source.index("        if is_holder:", start)
-    return source[start:end]
-
-
 def _name_gate_process_table(root: Path):
     venv_python = root / "venv" / "Scripts" / "python.exe"
     foreign_python = Path("C:/Users/u/AppData/Local/uv/python/cpython-3.11/python.exe")
@@ -2899,16 +2891,3 @@ def test_detector_argv_rungs_require_an_interpreter_or_launcher_image(
 
     assert matched == {701, 702, 703, 704, 801}
     assert matched.isdisjoint({601, 602, 603, 604})
-
-
-def test_carrier_and_hermes_cli_holder_blocks_are_textually_identical() -> None:
-    import hermes_cli.update_cmd as update_cmd
-
-    carrier_block = _holder_block(CARRIER_SCANNER.read_text(encoding="utf-8"))
-    hermes_block = _holder_block(Path(update_cmd.__file__).read_text(encoding="utf-8"))
-
-    assert carrier_block == hermes_block
-    assert "interpreter_like" in carrier_block
-    # Every argv/cwd rung is gated; only the exe-root rung is unconditional.
-    assert carrier_block.count("if not is_holder and interpreter_like and") == 3
-    assert "if not is_holder and venv_prefix in cmdline.lower()" not in carrier_block

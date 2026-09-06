@@ -1,20 +1,11 @@
 import assert from 'node:assert/strict'
-import fs from 'node:fs'
-import path from 'node:path'
 
 import { describe, it } from 'vitest'
 
-import { buildExactTerminateScript, parseTerminateScriptOutput } from './windows-process-terminate'
+import type { ForceReleaseHolder } from './windows-update-force-release'
 
-/**
- * 2026-09-06 review, P0-1: the scanner promoted any process whose argv merely
- * mentioned the venv to a "holder", main.ts passed `installRoot` only when a
- * Restart Manager resource was present, and the rendered script skipped the
- * whole authorization block when both claims were empty. A scanner-only
- * holder and its entire descendant tree were therefore job-killed on pid +
- * creation time alone. These are source-contract tests on the rendered
- * PowerShell; the real-PowerShell boundary suites exercise the mechanics.
- */
+import { buildExactTerminateScript, createWindowsHolderTerminator, parseTerminateScriptOutput } from './windows-process-terminate'
+
 describe('exact terminate script: executable-under-install-root authorization', () => {
   const withRoot = buildExactTerminateScript(4242, 1_700_000_000, 500, { installRoot: 'C:\\hermes' })
   const withoutRoot = buildExactTerminateScript(4242, 1_700_000_000, 500)
@@ -65,16 +56,55 @@ describe('exact terminate script: executable-under-install-root authorization', 
   })
 })
 
-describe('main.ts force-release wiring', () => {
-  const source = fs.readFileSync(path.join(__dirname, 'main.ts'), 'utf8')
+describe('force-release holder routing', () => {
+  it.each(['scanner', 'restart-manager'] as const)('passes the install root for a %s holder', async source => {
+    const holder: ForceReleaseHolder = {
+      pid: 4242, createdAt: 1_700_000_000, name: 'python.exe', cmdline: '', source,
+      ...(source === 'restart-manager' ? { resource: 'C:\\hermes\\venv\\native.pyd' } : {})
+    }
+    const signal = new AbortController().signal
+    const terminate = createWindowsHolderTerminator('C:\\hermes', async () => {
+      assert.fail('generic holders must not use the plugin service path')
+    }, async (target, options) => {
+      assert.equal(target, holder)
+      assert.deepEqual(options, { budgetMs: 500, deadlineAt: 900, signal, installRoot: 'C:\\hermes' })
+      return { kind: 'terminated' }
+    })
 
-  it('passes the install root for every holder, not only Restart Manager ones', () => {
-    const start = source.indexOf('terminateHolder: async (holder, budgetMs, signal, deadlineAt) => {')
-    assert.ok(start > 0, 'production terminateHolder callback present')
-    const callback = source.slice(start, source.indexOf('\n  })', start))
+    assert.deepEqual(await terminate(holder, 500, signal, 900), { kind: 'terminated' })
+  })
 
-    assert.match(callback, /return terminateWindowsHolderWithinDeadline\(holder, \{[\s\S]*?installRoot: updateRoot[\s\S]*?\}\)/)
-    assert.doesNotMatch(callback, /proveResource/)
-    assert.doesNotMatch(callback, /\.\.\.\(.*installRoot/)
+  it('derives an absolute deadline from the holder budget when none is supplied', async () => {
+    const holder: ForceReleaseHolder = {
+      pid: 4242, createdAt: 1_700_000_000, name: 'python.exe', cmdline: '', source: 'scanner'
+    }
+    const before = Date.now()
+    const terminate = createWindowsHolderTerminator('C:\\hermes', async () => false, async (_target, options) => {
+      assert.ok(options.deadlineAt >= before + 500)
+      assert.ok(options.deadlineAt <= Date.now() + 500)
+      return { kind: 'terminated' }
+    })
+
+    assert.deepEqual(await terminate(holder, 500), { kind: 'terminated' })
+  })
+
+  it.each([true, false])('uses the plugin unit stop result (%s) without generic termination', async stopped => {
+    const service: NonNullable<ForceReleaseHolder['service']> = {
+      pid: 4242, createdAt: 100, name: 'python.exe', cmdline: '', owner: 'desktop',
+      role: 'desktop_plugin_wrapper', actionable: true,
+      actionability: 'exact_desktop_plugin_service', action: 'terminate_desktop_plugin_service'
+    }
+    const holder: ForceReleaseHolder = {
+      pid: service.pid, createdAt: service.createdAt, name: service.name, cmdline: '', source: 'scanner',
+      terminateVia: 'desktop-plugin-service', service
+    }
+    const terminate = createWindowsHolderTerminator('C:\\hermes', async observed => {
+      assert.equal(observed, service)
+      return stopped
+    }, async () => { assert.fail('plugin units must not use generic termination') })
+
+    assert.deepEqual(await terminate(holder, 500), stopped
+      ? { kind: 'terminated' }
+      : { kind: 'failed', detail: 'plugin service unit not stopped' })
   })
 })

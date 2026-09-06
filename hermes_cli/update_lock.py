@@ -23,10 +23,9 @@ unchanged and remain byte-compatible with the Rust and Electron readers:
 
     <HERMES_HOME>/.hermes-update-in-progress   body: "<pid>\\n<started_at_unix>"
 
-A marker only counts as a live update when its pid is alive AND it is younger
-than :data:`UPDATE_MARKER_MAX_AGE_MS` — mirroring ``readLiveUpdateMarker`` so a
-crashed updater self-heals instead of wedging every future update. A stale
-marker is removed on read by whoever notices it first.
+A marker remains authoritative while its pid is alive. Age alone cannot prove
+that an updater stopped mutating the installation. A dead owner's marker is
+removed on read so a crashed updater does not strand future updates.
 
 One layering wrinkle: the Tauri updater holds this marker for its WHOLE run and
 then spawns ``hermes update`` as a child stage. Without a handoff the child
@@ -58,10 +57,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Keep in sync with UPDATE_MARKER_MAX_AGE_MS in
-# apps/desktop/electron/update-marker.ts — the same marker is read by both, and
-# a shorter ceiling here would let Python steal a lock Electron still considers
-# live. A full update (git pull + uv sync + desktop rebuild) is minutes.
+# Advisory age retained for callers that display overdue updates. It is not
+# permission to reclaim a live owner's marker.
 UPDATE_MARKER_MAX_AGE_SECONDS = 20 * 60
 
 MARKER_NAME = ".hermes-update-in-progress"
@@ -172,8 +169,8 @@ def read_live_update(*, path: Path | None = None) -> UpdateHolder | None:
     """Return the live update holding the lock, or ``None``.
 
     Mirrors ``readLiveUpdateMarker`` in ``electron/update-marker.ts``: absent,
-    unreadable, malformed, dead-pid, and past-the-ceiling all mean "no live
-    update", and a stale marker file is deleted so it can't strand future runs.
+    unreadable, malformed, and dead-pid all mean "no live update". A live owner
+    is not evicted merely because an update takes longer than the age ceiling.
     Never raises.
     """
     marker = path or update_marker_path()
@@ -193,7 +190,7 @@ def read_live_update(*, path: Path | None = None) -> UpdateHolder | None:
         started_at = float("-inf")
 
     age = time.time() - started_at
-    if not _pid_alive(pid) or age > UPDATE_MARKER_MAX_AGE_SECONDS:
+    if not _pid_alive(pid):
         try:
             marker.unlink()
         except OSError:

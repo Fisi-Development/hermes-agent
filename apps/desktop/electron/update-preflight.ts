@@ -484,6 +484,12 @@ export async function runWindowsUpdatePreflight(
       }
     }
 
+    // Bound repeated force-release attempts across stability scans. The
+    // non-force path starts its existing grace period when a holder appears.
+    if (typeof deps.forceReleaseInstallHolders === 'function') {
+      genericHolderDeadline ??= now() + genericHolderTimeoutMs
+    }
+
     while (true) {
       await sleep(respawnIntervalMs)
       let secondClear = await scanFailClosed()
@@ -494,6 +500,15 @@ export async function runWindowsUpdatePreflight(
 
       if (secondClear.kind === 'blocked' && genericHoldersOnly(secondClear.result)) {
         if (typeof deps.forceReleaseInstallHolders === 'function') {
+          if (genericHolderDeadline !== null && now() >= genericHolderDeadline) {
+            return {
+              kind: 'blocked',
+              reason: 'quiesce-incomplete',
+              result: secondClear.result,
+              message: quiesceIncompleteMessage()
+            }
+          }
+
           const forced = await forceReleaseAndRescan(secondClear.result)
 
           if ('outcome' in forced) {

@@ -24,9 +24,35 @@ import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 
-import type { ForceReleaseHolder, ForceReleaseTerminateResult } from './windows-update-force-release'
+import type { ForceReleaseHolder, ForceReleaseTerminateResult, WindowsUpdateForceReleaseDeps } from './windows-update-force-release'
 
 const execFileAsync = promisify(execFile)
+
+// A Job handle does not signal when its last process exits. Query accounting
+// under the same deadline to prove that termination drained every member.
+const JOB_DRAIN_NATIVE = String.raw`
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JobAccounting {
+        public long TotalUserTime, TotalKernelTime, ThisPeriodTotalUserTime, ThisPeriodTotalKernelTime;
+        public uint TotalPageFaultCount, TotalProcesses, ActiveProcesses, TotalTerminatedProcesses;
+    }
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool QueryInformationJobObject(IntPtr job, int infoClass, out JobAccounting info, uint length, IntPtr returnLength);
+    private static int WaitForJobEmpty(IntPtr job, int waitMs) {
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        while (true) {
+            JobAccounting info;
+            if (!QueryInformationJobObject(job, 1, out info, (uint)Marshal.SizeOf(typeof(JobAccounting)), IntPtr.Zero)) {
+                int error = Marshal.GetLastWin32Error();
+                return error == 0 ? -1 : -error;
+            }
+            if (info.ActiveProcesses == 0) return 0;
+            long remaining = Math.Max(0, waitMs) - timer.ElapsedMilliseconds;
+            if (remaining <= 0) return -258;
+            System.Threading.Thread.Sleep((int)Math.Min(10, remaining));
+        }
+    }
+`
 
 export type StartTargetJobWatcher = (
   ownerPid: number,
@@ -200,6 +226,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 
 public static class HermesTerminateJob {
+${JOB_DRAIN_NATIVE}
     [StructLayout(LayoutKind.Sequential)]
     private struct BasicLimits {
         public long PerProcessUserTimeLimit, PerJobUserTimeLimit;
@@ -255,11 +282,7 @@ public static class HermesTerminateJob {
             int error = Marshal.GetLastWin32Error();
             return error == 0 ? -1 : -error;
         }
-        uint result = WaitForSingleObject(job, (uint)Math.Max(0, waitMs));
-        if (result == 0) return 0;
-        if (result == 258) return -258;
-        int waitError = Marshal.GetLastWin32Error();
-        return waitError == 0 ? -1 : -waitError;
+        return WaitForJobEmpty(job, waitMs);
     }
     public static void Close(IntPtr job) {
         if (job != IntPtr.Zero) CloseHandle(job);
@@ -428,6 +451,7 @@ Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 public static class HermesTerminateNamedJob {
+${JOB_DRAIN_NATIVE}
     private const uint JOB_OBJECT_TERMINATE = 0x0008;
     private const uint JOB_OBJECT_QUERY = 0x0004;
     private const uint SYNCHRONIZE = 0x00100000;
@@ -452,10 +476,7 @@ public static class HermesTerminateNamedJob {
                 int terminateError = Marshal.GetLastWin32Error();
                 return terminateError == 0 ? -1 : -terminateError;
             }
-            uint result = WaitForSingleObject(job, (uint)Math.Max(0, waitMs));
-            if (result == WAIT_OBJECT_0) return 0;
-            if (result == WAIT_TIMEOUT) return -258;
-            return -(int)result;
+            return WaitForJobEmpty(job, waitMs);
         } finally {
             CloseHandle(job);
         }
@@ -533,6 +554,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
 public static class HermesTerminateWatch {
+${JOB_DRAIN_NATIVE}
     private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
     private const uint SYNCHRONIZE = 0x00100000;
     private const uint JOB_OBJECT_TERMINATE = 0x0008;
@@ -644,9 +666,9 @@ public static class HermesTerminateWatch {
             }
             uint jobRemaining = Remaining(deadlineAt);
             if (jobRemaining == 0) return Failure(readyPath, readyNonce, "job-deadline", (int)WAIT_TIMEOUT);
-            uint result = WaitForSingleObject(job, Math.Min(1500U, jobRemaining));
-            if (result == WAIT_OBJECT_0) return 0;
-            return Failure(readyPath, readyNonce, "job-wait", result == WAIT_FAILED ? Marshal.GetLastWin32Error() : (int)result);
+            int result = WaitForJobEmpty(job, (int)Math.Min(1500U, jobRemaining));
+            if (result == 0) return 0;
+            return Failure(readyPath, readyNonce, "job-wait", -result);
         } finally {
             CloseHandle(job);
             CloseHandle(owner);
@@ -807,7 +829,9 @@ async function readProcessCreatedAt(
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        `$p = Get-Process -Id ${Math.trunc(pid)} -ErrorAction Stop; [DateTimeOffset]::new($p.StartTime.ToUniversalTime()).ToUnixTimeSeconds()`
+        `$p = Get-Process -Id ${Math.trunc(pid)} -ErrorAction Stop; ` +
+          'if ($p.HasExited -or $p.WaitForExit(0)) { exit 3 }; ' +
+          '[DateTimeOffset]::new($p.StartTime.ToUniversalTime()).ToUnixTimeSeconds()'
       ],
       { encoding: 'utf8', windowsHide: true, timeout: budget }
     )
@@ -953,8 +977,13 @@ async function defaultLivenessProbeRunner(
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        // Exit 0 = live, 3 = explicitly not found, anything else = unknown.
-        `$p = Get-Process -Id ${Math.trunc(pid)} -ErrorAction SilentlyContinue; if ($null -ne $p) { exit 0 } else { exit 3 }`
+        // A terminated process object can remain enumerable while another
+        // process still owns a handle. Its zero-time wait is nevertheless
+        // authoritative terminal-state evidence. Exit 0 = runnable, 3 =
+        // absent/terminated, anything else = unknown.
+        `$p = Get-Process -Id ${Math.trunc(pid)} -ErrorAction SilentlyContinue; ` +
+          'if ($null -eq $p) { exit 3 }; ' +
+          'try { if ($p.HasExited -or $p.WaitForExit(0)) { exit 3 }; exit 0 } catch { exit 4 }'
       ],
       { windowsHide: true, timeout: timeoutMs }
     )
@@ -1985,7 +2014,7 @@ async function defaultRunPowerShell(
             ...finalResult,
             stderr: [watcherStartupFailure, watcherResult.detail, finalResult.stderr]
               .filter(Boolean)
-              .join('\\n'),
+              .join('\n'),
             code: 1,
             pid: childPid
           }
@@ -1996,7 +2025,7 @@ async function defaultRunPowerShell(
             ...finalResult,
             stderr: [formatTargetJobWatcherDiagnostics(watcherDiagnostics), finalResult.stderr]
               .filter(Boolean)
-              .join('\\n'),
+              .join('\n'),
             pid: childPid
           }
         }
@@ -2004,10 +2033,23 @@ async function defaultRunPowerShell(
         if (!targetBoundaryConfirmed) {
           finalResult = {
             ...finalResult,
-            stderr: [finalResult.stderr, 'target-boundary-unconfirmed'].filter(Boolean).join('\\n'),
+            stderr: [finalResult.stderr, 'target-boundary-unconfirmed'].filter(Boolean).join('\n'),
             code: 1,
             pid: childPid
           }
+        }
+
+        // Node's exit status is evidence for the exact child it spawned, even
+        // when a fresh PowerShell liveness probe exhausts the remaining budget.
+        // The target receipt separately proves the external holder job drained.
+        if (
+          killResult && !killResult.confirmed && targetBoundaryConfirmed &&
+          childProcess && childProcess.pid === wrapperProcessIdentity?.pid &&
+          (childProcess.exitCode != null || childProcess.signalCode != null) &&
+          hasSuccessfulWrapperReceipt(wrapperPhasePath, wrapperPhaseNonce)
+        ) {
+          const survivors = killResult.survivors.filter(identity => identity.pid !== childProcess.pid)
+          killResult = { ...killResult, survivors, confirmed: survivors.length === 0 }
         }
 
         if (killResult && !killResult.confirmed) {
@@ -2018,7 +2060,7 @@ async function defaultRunPowerShell(
               `unconfirmed-tree-survivors:${killResult.survivors.map(s => s.pid).join(',')}`
             ]
               .filter(Boolean)
-              .join('\\n'),
+              .join('\n'),
             code: 1,
             pid: childPid
           }
@@ -2027,7 +2069,7 @@ async function defaultRunPowerShell(
         if (!watcherTerminal) {
           finalResult = {
             ...finalResult,
-            stderr: [finalResult.stderr, 'watcher-terminal-state-unconfirmed'].filter(Boolean).join('\\n'),
+            stderr: [finalResult.stderr, 'watcher-terminal-state-unconfirmed'].filter(Boolean).join('\n'),
             code: 1,
             pid: childPid
           }
@@ -2058,7 +2100,7 @@ async function defaultRunPowerShell(
               finalResult.stderr
             ]
               .filter(Boolean)
-              .join('\\n'),
+              .join('\n'),
             pid: childPid
           }
         }
@@ -2317,6 +2359,7 @@ using System;
 using System.Text;
 using System.Runtime.InteropServices;
 public static class HermesForceReleaseNative {
+${JOB_DRAIN_NATIVE}
   public const uint PROCESS_TERMINATE = 0x0001;
   public const uint PROCESS_SET_QUOTA = 0x0100;
   public const uint PROCESS_SUSPEND_RESUME = 0x0800;
@@ -2554,11 +2597,7 @@ public static class HermesForceReleaseNative {
       int error = Marshal.GetLastWin32Error();
       return error == 0 ? -1 : -error;
     }
-    uint result = WaitForSingleObject(job, (uint)Math.Max(0, waitMs));
-    if (result == WAIT_OBJECT_0) return 0;
-    if (result == WAIT_TIMEOUT) return -258;
-    int waitError = Marshal.GetLastWin32Error();
-    return waitError == 0 ? -1 : -waitError;
+    return WaitForJobEmpty(job, waitMs);
   }
 }
 "@
@@ -2703,11 +2742,8 @@ try {
     if ($rootOpenError -eq 0x10001) { throw ("CREATE_TIME_MISMATCH root=" + $pidTarget) }
     throw ('HOLDER_OPEN_FAILED win32=' + $rootOpenError)
   }
-  # The executable-under-install-root proof is unconditional: pid + creation
-  # time alone never authorize a kill. A scanner-only holder used to reach
-  # this script without an install-root claim and skipped this whole block,
-  # so any process whose argv merely mentioned the venv was terminated with
-  # its entire descendant tree (2026-09-06 review, P0-1).
+  # PID and creation time prove identity, not authority to terminate. Every
+  # target must also execute from this installation.
   if ([string]::IsNullOrWhiteSpace($installRootClaim)) {
     throw 'TERMINATION_AUTHORIZATION_CLAIM_MISSING'
   }
@@ -3039,4 +3075,26 @@ export async function terminateWindowsHolderWithinDeadline(
     deadlineAt: absoluteDeadline,
     installRoot
   })
+}
+
+/** Route plugin units through their owner and authorize every other holder by install root. */
+export function createWindowsHolderTerminator(
+  installRoot: string,
+  stopPluginService: (service: NonNullable<ForceReleaseHolder['service']>) => Promise<boolean>,
+  terminate = terminateWindowsHolderWithinDeadline
+): WindowsUpdateForceReleaseDeps['terminateHolder'] {
+  return async (holder, budgetMs, signal, deadlineAt) => {
+    if (holder.terminateVia === 'desktop-plugin-service' && holder.service) {
+      const stopped = await stopPluginService(holder.service)
+
+      return stopped ? { kind: 'terminated' } : { kind: 'failed', detail: 'plugin service unit not stopped' }
+    }
+
+    return terminate(holder, {
+      budgetMs,
+      deadlineAt: deadlineAt ?? Date.now() + Math.max(0, budgetMs),
+      signal,
+      installRoot
+    })
+  }
 }

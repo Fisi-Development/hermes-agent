@@ -1937,12 +1937,13 @@ try {
         if (-not [int64]::TryParse($env:HERMES_UPDATE_STARTED_AT, [ref]$desktopStartedAt) -or $desktopStartedAt -le 0) {
             $desktopStartedAt = 0L
         }
-        # Claim with an atomic create-only operation; never overwrite a
-        # concurrent updater's marker.
-        $script:MarkerBody = "$PID`n$startedAt`n"
-        if (-not (Claim-UpdateMarker $script:MarkerBody)) {
+        # Assign our cleanup claim only after CreateNew succeeds, so a losing
+        # claimant cannot move or remove the winning updater's marker.
+        $markerBody = "$PID`n$startedAt`n"
+        if (-not (Claim-UpdateMarker $markerBody)) {
             throw "update marker already exists or could not be claimed"
         }
+        $script:MarkerBody = $markerBody
         Write-HandoffLog "claimed update marker (pid $PID, created $startedAt; desktop hand-off started at $desktopStartedAt)"
     } catch {
         $finalCode = 8

@@ -137,6 +137,43 @@ function makeDeps(scans: ScanOutcome[], overrides: Partial<UpdatePreflightDeps> 
 }
 
 describe.each(PURPOSES)('runWindowsUpdatePreflight (%s)', purpose => {
+  it('stops force-release retries when a generic holder keeps respawning', async () => {
+    let clock = 0
+    let scans = 0
+    let releases = 0
+    let clearedLease = false
+    const holder = { pid: 202, name: 'python.exe', cmdline: 'hermes gateway status --deep' }
+    const { deps } = makeDeps([], {
+      now: () => clock,
+      wait: async ms => { clock += ms },
+      scan: async () => {
+        scans += 1
+        return scans <= 2 || scans % 2 === 0
+          ? clear()
+          : { kind: 'blocked', result: result({ blocked: true, processes: [holder] }) }
+      },
+      forceReleaseInstallHolders: async () => {
+        releases += 1
+        assert.ok(releases < 10, 'force-release must not retry indefinitely')
+        return { kind: 'clear' }
+      },
+      clearMcpBridgeLease: () => { clearedLease = true }
+    })
+
+    const outcome = await runWindowsUpdatePreflight(purpose, deps, {
+      cooperativeExitMs: 0,
+      genericHolderTimeoutMs: 15,
+      respawnIntervalMs: 5,
+      terminationSettleMs: 0
+    })
+
+    assert.equal(outcome.kind, 'blocked')
+    assert.equal(outcome.reason, 'quiesce-incomplete')
+    assert.deepEqual(outcome.result?.processes, [holder])
+    assert.equal(releases, 2)
+    assert.equal(clearedLease, true)
+  })
+
   it('fails closed before scanning when tracked backend trees do not unlock and no force-release is wired', async () => {
     const { calls, deps } = makeDeps([], {
       releaseTrackedBackendTrees: async () => {

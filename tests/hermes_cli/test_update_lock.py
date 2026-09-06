@@ -112,13 +112,16 @@ def test_dead_owner_is_reclaimed_not_honored(marker):
     assert int(marker.read_text(encoding="utf-8").splitlines()[0]) == os.getpid()
 
 
-def test_owner_past_the_age_ceiling_is_reclaimed(marker):
-    """A live-but-wedged updater must not hold the lock forever."""
+def test_live_owner_past_the_age_ceiling_remains_authoritative(marker):
+    """A slow updater must not lose mutual exclusion while it is still alive."""
     long_ago = int(time.time()) - UPDATE_MARKER_MAX_AGE_SECONDS - 60
     marker.write_text(f"{os.getpid()}\n{long_ago}\n", encoding="utf-8")
 
-    lock = UpdateLock(path=marker)
-    assert lock.acquire() is True
+    holder = read_live_update(path=marker)
+    assert holder is not None
+    assert holder.pid == os.getpid()
+    assert holder.age_seconds > UPDATE_MARKER_MAX_AGE_SECONDS
+    assert marker.read_text(encoding="utf-8") == f"{os.getpid()}\n{long_ago}\n"
 
 
 @pytest.mark.parametrize(

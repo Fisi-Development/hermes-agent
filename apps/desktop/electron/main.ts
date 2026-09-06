@@ -409,7 +409,13 @@ import {
   shouldCountCommits
 } from './update-count'
 import { UpdateInFlightTransaction, waitForLocalBackendClearance, waitForUpdateClearance } from './update-gate'
-import { readLiveUpdateMarker, releaseUpdateMarkerIfOwnedBy, updateHandoffConflict, writeUpdateMarker } from './update-marker'
+import {
+  readLiveUpdateMarker,
+  releaseUpdateMarkerIfOwnedBy,
+  UPDATE_MARKER_MAX_AGE_MS,
+  updateHandoffConflict,
+  writeUpdateMarker
+} from './update-marker'
 import {
   authorizeUpdateMutation,
   runAuthorizedUpdateMutation,
@@ -480,7 +486,7 @@ import {
   resolveVenvHermesCommand
 } from './windows-hermes-path'
 import { getCachedWindowsProcessCreatedAt } from './windows-process-identity'
-import { terminateWindowsHolderWithinDeadline } from './windows-process-terminate'
+import { createWindowsHolderTerminator } from './windows-process-terminate'
 import {
   connectWindowsRemote,
   detectRemotePlatform,
@@ -2455,6 +2461,17 @@ async function waitForUpdateToFinish() {
     timeoutMs: UPDATE_WAIT_TIMEOUT_MS
   })
 
+  if (outcome === 'timeout') {
+    // End this startup attempt without racing a possibly live updater.
+    const marker = readLiveUpdateMarker(HERMES_HOME)
+    const state = marker ? `${marker.kind}${'reason' in marker && marker.reason ? `/${marker.reason}` : ''}` : 'absent'
+
+    rememberLog(
+      `[updates] UPDATE GATE TIMED OUT: still closed after ${Math.round(UPDATE_MARKER_MAX_AGE_MS / 60_000)} min (marker=${state}); local backend startup refused`
+    )
+    throw new Error('The Hermes update has not released the installation. Retry connecting after the update finishes.')
+  }
+
   // The detached hand-off script (scripts/desktop-update/windows.ps1) runs hidden;
   // its result file is the ONLY way the user learns a detached update
   // failed. Consume it exactly once, here, right where boot passes the
@@ -4259,26 +4276,9 @@ async function forceReleaseInstallHoldersForUpdate(updateRoot: string) {
 
       rememberLog(`[updates] force-release ${formatHolderLine(holder)} -> ${result.kind}${detail} (${elapsedMs}ms)`)
     },
-    terminateHolder: async (holder, budgetMs, signal, deadlineAt) => {
-      if (holder.terminateVia === 'desktop-plugin-service' && holder.service) {
-        const stopped = await stopDesktopPluginServiceUnit(updateRoot, holder.service)
-
-        return stopped ? { kind: 'terminated' } : { kind: 'failed', detail: 'plugin service unit not stopped' }
-      }
-
-      // Every holder carries the install root: the script proves the target's
-      // executable (and each descendant's) lives under it before anything is
-      // assigned to the kill job. Without the claim a scanner-only holder was
-      // killed on pid + creation time alone (2026-09-06 review, P0-1). When
-      // Restart Manager also named a file this process holds, the script
-      // re-proves that ownership from `holder.resource`.
-      return terminateWindowsHolderWithinDeadline(holder, {
-        budgetMs,
-        deadlineAt: deadlineAt ?? Date.now(),
-        signal,
-        installRoot: updateRoot
-      })
-    }
+    terminateHolder: createWindowsHolderTerminator(updateRoot, service =>
+      stopDesktopPluginServiceUnit(updateRoot, service)
+    )
   })
 }
 
