@@ -3207,6 +3207,7 @@ async function resolveDesktopUpdateBranch(updateRoot) {
   const currentBranch = firstLine(current.stdout)
   const originUrl = await getOriginUrl(updateRoot)
   const remote = isOfficialSshRemote(originUrl) ? OFFICIAL_REPO_HTTPS_URL : 'origin'
+
   const published = currentBranch && currentBranch !== 'HEAD'
     ? await runGit(['ls-remote', '--exit-code', '--heads', remote, currentBranch], { cwd: updateRoot })
     : null
@@ -3667,50 +3668,6 @@ function forceKillProcessTree(pid) {
   } catch {
     // Already gone, or no permission â€” best effort; the unlock wait below is
     // the real gate.
-  }
-}
-
-// Kill every non-Desktop process executing from this Hermes install. Selecting
-// tree roots keeps taskkill /T authoritative across Python/Node trampolines;
-// this is target collection only, never a holder-classification gate.
-function forceKillAllHermesBackendTrees(updateRoot: string) {
-  if (!IS_WINDOWS) {
-    return
-  }
-
-  const root = `${path.resolve(updateRoot).replace(/'/g, "''").replace(/[\\/]+$/, '')}\\`
-  const desktopExecutable = path.resolve(process.execPath).replace(/'/g, "''")
-  const script = `
-$ErrorActionPreference = 'SilentlyContinue'
-$root = '${root}'
-$desktopExecutable = '${desktopExecutable}'
-$processes = @(Get-CimInstance Win32_Process)
-$targets = @($processes | Where-Object {
-  $executable = [string]$_.ExecutablePath
-  $_.ProcessId -ne ${process.pid} -and
-    $executable.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -and
-    -not $executable.Equals($desktopExecutable, [StringComparison]::OrdinalIgnoreCase)
-})
-$targetIds = @{}
-foreach ($target in $targets) {
-  $targetIds[[int]$target.ProcessId] = $true
-}
-foreach ($target in $targets) {
-  if (-not $targetIds.ContainsKey([int]$target.ParentProcessId)) {
-    & taskkill.exe /PID ([string]$target.ProcessId) /T /F *> $null
-  }
-}
-`
-
-  try {
-    execFileSync(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-Command', script],
-      hiddenWindowsChildOptions({ stdio: 'ignore' })
-    )
-  } catch {
-    // Each tree kill is best effort; the existing shim-unlock wait below is
-    // still the fail-closed hand-off gate.
   }
 }
 
@@ -4406,6 +4363,7 @@ async function handOffWindowsBootstrapRecoveryTransaction(reason) {
   }
 
   const updateRoot = resolveUpdateRoot()
+
   const branch = directoryExists(path.join(updateRoot, '.git'))
     ? await resolveDesktopUpdateBranch(updateRoot)
     : readDesktopUpdateConfig().branch || DEFAULT_UPDATE_BRANCH
@@ -5495,6 +5453,7 @@ function fetchJson(url, token, options: any = {}) {
         const client = parsed.protocol === 'https:' ? https : http
         const agent = jsonAgentFor(parsed.protocol)
         const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
+
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
           reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
 
@@ -7946,6 +7905,7 @@ function fetchJsonViaOauthSession(url, options: any = {}) {
 
     const body = serializeJsonBody(options.body)
     const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
+
     const request = electronNet.request({
       method: options.method || 'GET',
       url,
@@ -17776,6 +17736,7 @@ ipcMain.handle('hermes:updates:apply', async (_event, payload) =>
 
 ipcMain.handle('hermes:updates:branch:get', async () => {
   const updateRoot = resolveUpdateRoot()
+
   const branch = directoryExists(path.join(updateRoot, '.git'))
     ? await resolveDesktopUpdateBranch(updateRoot)
     : readDesktopUpdateConfig().branch || DEFAULT_UPDATE_BRANCH
