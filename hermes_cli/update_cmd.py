@@ -448,8 +448,11 @@ def _update_log_append(text: str) -> None:
         _log_only_write(text)
         return
     try:
-        from hermes_cli.config import get_hermes_home
-
+        # Module-level ``get_hermes_home`` (the re-export at the top of this
+        # file) on purpose: a function-local re-import rebinds the name from
+        # hermes_cli.config on every call, so ``update_cmd.get_hermes_home``
+        # -- the patch point this module documents and every other caller here
+        # uses -- had no effect on this one path.
         log_path = get_hermes_home() / "logs" / "update.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "a", encoding="utf-8", errors="replace") as log_file:
@@ -461,15 +464,15 @@ def _update_log_append(text: str) -> None:
 _LOGGED_SUBPROCESS_PROGRESS_SECONDS = 30.0
 
 
-def _run_logged_subprocess(
-    cmd,
-    *,
-    cwd=None,
-    env=None,
-    label: str = "desktop build",
-    progress_every: float = _LOGGED_SUBPROCESS_PROGRESS_SECONDS,
-):
-    """Stream combined child output to update.log and return it when complete."""
+def _run_logged_subprocess(cmd, *, cwd=None, env=None):
+    """Stream combined child output to update.log and return it when complete.
+
+    The progress cadence is read from the module constant rather than taken as
+    a parameter: the only production caller is the desktop rebuild in
+    update_cmd_deps, which passes neither a label nor an interval, so a knob in
+    the signature existed for tests alone.
+    """
+    progress_every = _LOGGED_SUBPROCESS_PROGRESS_SECONDS
     started = _time.monotonic()
     last_progress = started
     lines: list[str] = []
@@ -493,7 +496,7 @@ def _run_logged_subprocess(
             if progress_every > 0 and now - last_progress >= progress_every:
                 last_progress = now
                 print(
-                    f"  … {label} running: {int(now - started)}s, "
+                    f"  … desktop build running: {int(now - started)}s, "
                     f"{len(lines)} lines captured (full output: logs/update.log)",
                     flush=True,
                 )
