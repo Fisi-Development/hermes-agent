@@ -16,6 +16,14 @@ export interface UpdatePreflightDeps {
   claim: UpdateMarkerClaim
   ownsUpdateMarker: (claim: UpdateMarkerClaim) => boolean
   now?: () => number
+  /**
+   * Observation of the installation taken BEFORE any teardown. Desktop plugin
+   * service UNITS found in it are stopped while the update marker is held and
+   * before the release gate, so their Windows Script Host supervisor cannot
+   * reopen the virtual environment during the release/force-release window.
+   * Optional only for unit tests that exercise the post-gate sequence directly.
+   */
+  observeBeforeGate?: () => Promise<ScanOutcome>
   releaseTrackedBackendTrees: () => Promise<{ unlocked: boolean }>
   /**
    * Non-elevated ≤5s force-release of exact install holders when tracked
@@ -109,6 +117,10 @@ function genericHoldersOnly(result: VenvBlockerScanResult): boolean {
   return result.processes.length > 0 && result.mcpBridges.length === 0
 }
 
+function markerUnavailableMessage(): string {
+  return 'Update aborted: Hermes no longer owns the update marker. Retry after any other update finishes.'
+}
+
 function quiesceIncompleteMessage(): string {
   return (
     'Update aborted: processes from this Hermes installation did not remain stopped. ' +
@@ -147,9 +159,48 @@ export async function runWindowsUpdatePreflight(
   }
 
   if (!ownsClaim()) {
-    return {
-      kind: 'blocked', reason: 'marker-unavailable',
-      message: 'Update aborted: Hermes no longer owns the update marker. Retry after any other update finishes.'
+    return { kind: 'blocked', reason: 'marker-unavailable', message: markerUnavailableMessage() }
+  }
+
+  // Stop Desktop plugin service UNITS first: with the update marker held, but
+  // BEFORE the release gate and before any force-release pass. Each unit is
+  // supervised by a Windows Script Host loop that relaunches the service ten
+  // seconds after it exits, so a unit first discovered inside the
+  // force-release loop can reopen the virtual environment during the very
+  // window that loop is trying to clear. `desktopPluginServiceUnits` keeps the
+  // supervisor -> wrapper -> worker, once-per-unit ordering, and the caller's
+  // terminate records the stopped supervisor for post-update restoration.
+  // Best-effort: a unit that refuses to stop is still caught by the post-gate
+  // drain below, and the fail-closed stability scans still refuse the update.
+  if (typeof deps.observeBeforeGate === 'function') {
+    let preGate: ScanOutcome
+
+    try {
+      preGate = await deps.observeBeforeGate()
+    } catch (error) {
+      return {
+        kind: 'probe-failure',
+        error: `scanner threw: ${errorText(error)}`,
+        message: formatProbeFailedMessage()
+      }
+    }
+
+    if (preGate.kind === 'probe-failure') {
+      return { kind: 'probe-failure', error: preGate.error, message: formatProbeFailedMessage(preGate) }
+    }
+
+    if (preGate.kind === 'blocked') {
+      for (const service of desktopPluginServiceUnits(preGate.result.desktopPluginServices)) {
+        if (!ownsClaim()) {
+          return { kind: 'blocked', reason: 'marker-unavailable', message: markerUnavailableMessage() }
+        }
+
+        try {
+          await deps.terminateDesktopPluginService(service)
+        } catch {
+          // Best-effort (see above): the post-gate drain re-discovers it.
+        }
+      }
     }
   }
 

@@ -435,7 +435,6 @@ import {
 } from './updater-process'
 import {
   type DesktopPluginServiceProcess,
-  formatProbeFailedMessage,
   resolveVenvPython,
   scanVenvBlockers,
   stopSafeVenvBlockers,
@@ -4086,17 +4085,14 @@ async function runWindowsHandoffPreflight(
   updateRoot: string,
   claim: UpdateMarkerClaim
 ): Promise<UpdatePreflightOutcome> {
-  const observed = await scanVenvBlockers(updateRoot)
-
-  if (observed.kind === 'probe-failure') {
-    // Pass the observed failure through: a scanner that could not load its own
-    // dependency names the exact repair, and "retry" is useless advice for it.
-    return { kind: 'probe-failure', error: observed.error, message: formatProbeFailedMessage(observed) }
-  }
-
   return runWindowsUpdatePreflight({
     claim,
     ownsUpdateMarker: ownsDesktopUpdateClaim,
+    // The pre-teardown observation. The preflight passes its probe failures
+    // through unchanged — a scanner that could not load its own dependency
+    // names the exact repair, and "retry" is useless advice for it — and stops
+    // the Desktop plugin service units it finds before the release gate.
+    observeBeforeGate: () => scanVenvBlockers(updateRoot),
     releaseTrackedBackendTrees: () => releaseBackendLockForUpdate(updateRoot),
     forceReleaseInstallHolders: () => forceReleaseInstallHoldersForUpdate(updateRoot),
     scan: () => scanVenvBlockers(updateRoot),

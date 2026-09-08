@@ -576,6 +576,60 @@ describe('MCP bridge drain', () => {
     ])
   })
 
+  it('stops Desktop plugin service units before the release gate touches the install', async () => {
+    const wrapper = desktopPluginService()
+
+    const worker = desktopPluginService({
+      pid: 302,
+      createdAt: 334.5,
+      role: 'desktop_plugin_worker',
+      wrapperPid: wrapper.pid
+    })
+
+    const { calls, deps } = makeDeps([clear(), clear(), clear()], {
+      observeBeforeGate: async () => {
+        calls.push('observe-before-gate')
+
+        return {
+          kind: 'blocked',
+          result: result({ blocked: true, desktopPluginServices: [wrapper, worker] })
+        }
+      }
+    })
+
+    const outcome = await runWindowsUpdatePreflight(deps, {
+      cooperativeExitMs: 0,
+      respawnIntervalMs: 0,
+      terminationSettleMs: 0
+    })
+
+    assert.equal(outcome.kind, 'clear')
+
+    const stop = `terminate-desktop-plugin:${wrapper.pid}:${wrapper.createdAt}`
+    const stopIndex = calls.indexOf(stop)
+    const releaseIndex = calls.indexOf('release')
+
+    assert.notEqual(stopIndex, -1, 'the plugin service unit must be stopped')
+    assert.ok(
+      stopIndex < releaseIndex,
+      `unit stop (index ${stopIndex}) must precede the release gate (index ${releaseIndex})`
+    )
+    // Still one call per unit, supervisor-anchored, and the ledger-recording
+    // terminate the post-gate drain uses.
+    assert.deepEqual(calls, ['observe-before-gate', stop, 'release', 'scan', 'wait:0', 'scan', 'wait:0', 'scan'])
+  })
+
+  it('passes a pre-gate probe failure through before any teardown', async () => {
+    const { calls, deps } = makeDeps([], {
+      observeBeforeGate: async () => ({ kind: 'probe-failure', error: SCANNER_DEPENDENCY_UNAVAILABLE })
+    })
+
+    const outcome = await runWindowsUpdatePreflight(deps)
+
+    assert.equal(outcome.kind, 'probe-failure')
+    assert.deepEqual(calls, [])
+  })
+
   it.each([
     {
       label: 'MCP bridge',
