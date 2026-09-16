@@ -79,7 +79,7 @@ import { dashboardFallbackArgs } from './backend-command'
 import { createBackendConnectionState } from './backend-connection-state'
 import { assertDescriptorStillOwned, forgetFailedDescriptor } from './backend-descriptor-cache'
 import { BackendDialClaims } from './backend-dial-claim'
-import { buildDesktopBackendEnv, profileBackendParentEnv } from './backend-env'
+import { buildDesktopBackendEnv, profileBackendParentEnv, refreshDesktopBackendHostPath } from './backend-env'
 import { isReauthRequiredError, waitForHermesReady } from './backend-health'
 import {
   backendCommandMatches,
@@ -92,7 +92,7 @@ import { recycleOwnedBackend } from './backend-recycle'
 import { isPidAliveWindows, waitForBackendRelease } from './backend-release-gate'
 import { createInstalledRuntimeGate } from './backend-resolution'
 import { createBackendServeSupportResolver } from './backend-serve-support'
-import { desktopBackendSpawnEnv } from './backend-spawn-env'
+import { desktopBackendSpawnEnv as baseDesktopBackendSpawnEnv } from './backend-spawn-env'
 import {
   isHostKeyChangedBootFailure,
   isRetryableRemoteBootFailure,
@@ -717,7 +717,7 @@ import {
   shouldSurfaceErrorForRendererStackCookieCrashLoop,
   writeGpuStackCookieMarker
 } from './windows-stack-cookie-fallback'
-import { readWindowsUserEnvVar } from './windows-user-env'
+import { readWindowsHostPath, readWindowsUserEnvVar } from './windows-user-env'
 import { isPackagedInstallPath as isPackagedInstallPathUnderRoots } from './workspace-cwd'
 import { readWslWindowsClipboardImage } from './wsl-clipboard-image'
 import { resolvePickerDefaultPath, setActiveGatewayProfile, setWslBridgeProfileState } from './wsl-path-bridge'
@@ -1330,6 +1330,12 @@ let desktopSshPathOverride = ''
       `[hermes] desktop launch switch from config.yaml: --${planned.name}${planned.value === undefined ? '' : `=${planned.value}`}`
     )
   }
+}
+
+// Every local backend uses this spawn boundary, whether its runtime is bundled,
+// installed, or sourced from a checkout.
+function desktopBackendSpawnEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return refreshDesktopBackendHostPath(baseDesktopBackendSpawnEnv(base), IS_WINDOWS ? readWindowsHostPath() : null)
 }
 
 // ACTIVE_HERMES_ROOT — the canonical mutable Hermes install. Same path
