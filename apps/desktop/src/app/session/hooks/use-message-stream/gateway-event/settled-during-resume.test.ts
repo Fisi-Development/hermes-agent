@@ -18,6 +18,7 @@ function complete(sessionId: string): GatewayEventContext {
       activeSessionIdRef: { current: sessionId },
       appendAssistantDelta: vi.fn(),
       appendReasoningDelta: vi.fn(),
+      completeReasoningSource: vi.fn(),
       compactedTurnRef: { current: new Set() },
       completeAssistantMessage: vi.fn(),
       failAssistantMessage: vi.fn(),

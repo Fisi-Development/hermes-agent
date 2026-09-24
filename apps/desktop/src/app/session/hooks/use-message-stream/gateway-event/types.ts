@@ -15,7 +15,14 @@ export interface GatewayEventDeps {
   lastCwdInfoSessionRef: MutableRefObject<string | null>
   nativeSubagentSessionsRef: MutableRefObject<Set<string>>
   appendAssistantDelta: (sessionId: string, delta: string, occurredAt?: number, stamp?: null | SegmentStamp) => void
-  appendReasoningDelta: (sessionId: string, delta: string, replace?: boolean, occurredAt?: number) => void
+  appendReasoningDelta: (
+    sessionId: string,
+    delta: string,
+    replace?: boolean,
+    occurredAt?: number,
+    sourceId?: string
+  ) => void
+  completeReasoningSource: (sessionId: string, sourceId: string, completedAt?: number) => void
   completeAssistantMessage: (
     sessionId: string,
     text: string,
