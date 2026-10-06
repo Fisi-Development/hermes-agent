@@ -12,6 +12,7 @@ import { $cronRunReadOnlyVerdicts, recordCronRunVerdict } from '@/store/read-onl
 import { $activeSessionId, $messages, $selectedStoredSessionId, $sessionResumeRequest, _resetSessionOwnerHintsForTests, setSessionOwnerHint, setSessions } from '@/store/session'
 import { $sessionTiles, openSessionTile, patchSessionTile, sessionTileDelegate } from '@/store/session-states'
 import { $sidebarSessionsOpenInNewTab } from '@/store/sidebar-open-preference'
+import { $todosBySession, clearAllSessionTodos } from '@/store/todos'
 import type { SessionInfo } from '@/types/hermes'
 
 import {
@@ -88,6 +89,21 @@ function renderTile(
 }
 
 describe('useSessionTileDelegate resumeTile', () => {
+  it('hydrates the canonical remaining plan when an idle session opens as a tile', async () => {
+    setSessions([row({ id: 'stored-todo', profile: 'ai-engineer' })])
+    const todos = [{ id: 'remaining', content: 'Unfinished work', status: 'in_progress' }]
+    vi.mocked(requestGatewayForProfile).mockResolvedValueOnce({
+      session_id: 'runtime-todo', session_key: 'stored-todo', running: false,
+      messages: [], info: {}, todo_state: { todos, revision: 7 }
+    } as never)
+    vi.mocked(getLatestSessionMessages).mockResolvedValueOnce({ messages: [], session_id: 'stored-todo' } as never)
+    renderTile(vi.fn(), {
+      updateSessionState: vi.fn((_sid, update) => update(createClientSessionState('stored-todo')))
+    })
+    await sessionTileDelegate()!.resumeTile('stored-todo')
+    expect($todosBySession.get()['runtime-todo']).toEqual(todos)
+  })
+
   it('adopts the running assistant and accepted queue on a newly opened tile', async () => {
     setSessions([row({ id: 'stored-live', profile: 'ai-engineer' })])
     const response = {
@@ -128,6 +144,7 @@ describe('useSessionTileDelegate resumeTile', () => {
 
   afterEach(() => {
     clearSingleFlightSessionResumeState()
+    clearAllSessionTodos()
     setSessions([])
     $sessionTiles.set([])
   })

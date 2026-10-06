@@ -37,6 +37,7 @@ import {
   sessionTileOwnerRoute,
   setSessionTileDelegate
 } from '@/store/session-states'
+import { restoreSessionTodosFromSnapshot } from '@/store/todos'
 import type { SessionResumeResult } from '@/types/hermes'
 
 import { refreshCronRunWriteGate } from '../../cron/open-cron-run'
@@ -623,6 +624,7 @@ export function useSessionTileDelegate({
                 : {}),
               awaitingResponse: running && !resumed.inflight?.assistant,
               busy: running,
+              turnLive: state.turnLive || running,
               adoptedRunningTurn: state.adoptedRunningTurn || running,
               streamId: running ? (runningProjectionStreamId(messages, true) ?? state.streamId) : null,
               messages
@@ -631,6 +633,11 @@ export function useSessionTileDelegate({
           storedSessionId
         )
 
+        restoreSessionTodosFromSnapshot(
+          runtimeId,
+          resumed.todo_state,
+          sessionStateByRuntimeIdRef.current.get(runtimeId)?.busy ?? Boolean(resumed.running ?? info?.running)
+        )
         return runtimeId
         })()
 
