@@ -48,12 +48,14 @@ import {
 import { markSessionRecentlyInterrupted, withSessionNotFoundResume } from '../../session/hooks/use-prompt-actions/utils'
 import type { useSessionActions } from '../../session/hooks/use-session-actions'
 import {
+  appendLiveSessionProjection,
   chatMessageArraysEquivalent,
   overlayConcurrentMessageChanges,
   preserveLocalPendingTurnMessages,
   reconcileResumeMessages,
   resolveResumedBusy,
-  resolveSessionOwner
+  resolveSessionOwner,
+  runningProjectionStreamId
 } from '../../session/hooks/use-session-actions/utils'
 import type { useSessionStateCache } from '../../session/hooks/use-session-state-cache'
 import type { ClientSessionState } from '../../types'
@@ -587,22 +589,17 @@ export function useSessionTileDelegate({
           runtimeId,
           state => {
             const previousMessages = state.messages.length > 0 ? state.messages : resumeRequestBaselineMessages
-
-            const messages = authoritativeSnapshot
+            const persistedMessages = authoritativeSnapshot
               ? resumed.messages.length > 0
-                ? overlayConcurrentMessageChanges(
-                    mergeTileTranscript(
-                      resumeRequestBaselineMessages,
-                      toChatMessages(resumed.messages),
-                      cached?.streamId
-                    ),
-                    resumeRequestBaselineMessages,
-                    previousMessages
-                  )
-                : previousMessages
-              : previousMessages.length > 0
-                ? previousMessages
-                : toChatMessages(prefetch?.messages ?? resumed.messages ?? [])
+                ? mergeTileTranscript(resumeRequestBaselineMessages, toChatMessages(resumed.messages), cached?.streamId)
+                : resumeRequestBaselineMessages
+              : toChatMessages(prefetch?.messages ?? resumed.messages ?? [])
+            const projectedMessages = appendLiveSessionProjection(persistedMessages, resumed)
+            const messages = overlayConcurrentMessageChanges(
+              projectedMessages,
+              authoritativeSnapshot ? resumeRequestBaselineMessages : persistedMessages,
+              previousMessages
+            )
 
             const busyChangedWhileResuming = cached
               ? Boolean(
@@ -626,6 +623,8 @@ export function useSessionTileDelegate({
                 : {}),
               awaitingResponse: running && !resumed.inflight?.assistant,
               busy: running,
+              adoptedRunningTurn: state.adoptedRunningTurn || running,
+              streamId: running ? (runningProjectionStreamId(messages, true) ?? state.streamId) : null,
               messages
             }
           },
