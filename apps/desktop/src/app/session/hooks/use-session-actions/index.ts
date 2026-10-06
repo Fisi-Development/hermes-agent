@@ -21,6 +21,8 @@ import {
 import { useI18n } from '@/i18n'
 import {
   type ChatMessage,
+  discardOpenClarifyToolCalls,
+  discardPendingClarifyToolCall,
   preserveLocalAssistantErrors,
   QUESTION_CARD_TOOLS,
   restorePendingClarifyToolCall,
@@ -1870,8 +1872,22 @@ export function useSessionActions({
                 )
               }
 
-              const pendingClarifyProjection = pendingClarify
-                ? restorePendingClarifyToolCall(activatedMessages, pendingClarifyToolPayload(pendingClarify))
+              // REST may outlive the request that authorized the early card.
+              // The shared request channel remains the only lifetime authority.
+              const currentClarifyRequest = $clarifyRequests.get()[cachedRuntimeId]
+              const pendingClarifyStillCurrent = Boolean(
+                pendingClarify && currentClarifyRequest?.requestId === pendingClarify.requestId
+              )
+              if (pendingClarify && !pendingClarifyStillCurrent) {
+                activatedMessages = discardPendingClarifyToolCall(
+                  activatedMessages,
+                  pendingClarifyToolPayload(pendingClarify),
+                  false
+                )
+              }
+
+              const pendingClarifyProjection = currentClarifyRequest
+                ? restorePendingClarifyToolCall(activatedMessages, pendingClarifyToolPayload(currentClarifyRequest))
                 : null
 
               const clearedClarifyProjection = clarifyAuthoritativelyAbsent
@@ -1882,16 +1898,19 @@ export function useSessionActions({
                   )
                 : null
 
+              const clarifyMessages = clearedClarifyProjection?.messages ?? activatedMessages
+              const visibleClarifyMessages = currentClarifyRequest
+                ? clarifyMessages
+                : discardOpenClarifyToolCalls(clarifyMessages)
               const pendingConnectionProjection = projectPendingConnection(
-                pendingClarifyProjection?.messages ?? clearedClarifyProjection?.messages ?? activatedMessages,
+                pendingClarifyProjection?.messages ?? visibleClarifyMessages,
                 pendingConnection
               )
 
               const visibleActivatedMessages =
                 pendingConnectionProjection?.messages ??
                 pendingClarifyProjection?.messages ??
-                clearedClarifyProjection?.messages ??
-                activatedMessages
+                visibleClarifyMessages
 
               if (!running) {
                 restoreSessionTodosFromSnapshot(
@@ -1921,6 +1940,9 @@ export function useSessionActions({
                       ? (expectedProvenance ?? undefined)
                       : undefined,
                   ...livePromptStreamId(pendingConnectionProjection, pendingClarifyProjection),
+                  ...(pendingClarify && !pendingClarifyStillCurrent && !currentClarifyRequest
+                    ? { needsInput: Boolean(pendingConnection) }
+                    : {}),
                   ...(clearedClarifyProjection
                     ? {
                         streamId: state.busy ? (clearedClarifyProjection.streamId ?? state.streamId) : null
@@ -1949,8 +1971,9 @@ export function useSessionActions({
               saveTranscriptTail(
                 storedSessionId,
                 stripPendingClarifyProjectionForCache(
-                  activatedMessages,
-                  pendingClarify?.requestId ??
+                  visibleClarifyMessages,
+                  currentClarifyRequest?.requestId ??
+                    pendingClarify?.requestId ??
                     pendingClarifyState.cleared?.requestId ??
                     $clarifyRequests.get()[cachedRuntimeId]?.requestId
                 ),
