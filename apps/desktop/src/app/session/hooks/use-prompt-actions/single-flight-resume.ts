@@ -1,4 +1,5 @@
 import { ambientOwnerConnectionId, type ProfileScope } from '@/api/client'
+import type { SessionOwnerScope } from '@/store/session-request-router'
 
 /**
  * Single-flight guard for `session.resume`, keyed by backend connection + STORED id.
@@ -28,6 +29,19 @@ function flightConnectionId(scope?: ProfileScope): string {
   return explicit || ambientOwnerConnectionId() || ''
 }
 
+/** Route mode is informational; a missing target is the route's own profile. */
+export function sessionResumeFlightKey(storedSessionId: string, owner?: ProfileScope | SessionOwnerScope): string {
+  const connectionId = flightConnectionId(owner)
+  if (!owner || typeof owner === 'string') {
+    // A bare profile and an unscoped recovery both use the ambient socket.
+    return JSON.stringify([storedSessionId.trim(), connectionId])
+  }
+
+  const profile = owner.profile?.trim() || 'default'
+  const target = 'targetProfile' in owner ? owner.targetProfile?.trim() || profile : profile
+  return JSON.stringify([storedSessionId.trim(), connectionId, profile, target])
+}
+
 interface SessionResumeFlight {
   includesMessages: boolean
   promise: Promise<unknown>
@@ -40,7 +54,7 @@ export function singleFlightSessionResume<T>(
   run: () => Promise<T>,
   options?: { requiresMessages?: boolean; scope?: ProfileScope }
 ): Promise<T> {
-  const flightKey = JSON.stringify([flightConnectionId(options?.scope), storedSessionId])
+  const flightKey = sessionResumeFlightKey(storedSessionId, options?.scope)
   const existing = _inFlightResumeByStoredSessionId.get(flightKey)
 
   if (existing && (!options?.requiresMessages || existing.includesMessages)) {

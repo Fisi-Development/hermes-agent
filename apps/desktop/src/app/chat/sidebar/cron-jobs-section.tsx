@@ -392,7 +392,7 @@ function CronJobSidebarRow({
   )
 }
 
-function CronJobSidebarRuns({
+export function CronJobSidebarRuns({
   jobId,
   onOpenRun
 }: {
