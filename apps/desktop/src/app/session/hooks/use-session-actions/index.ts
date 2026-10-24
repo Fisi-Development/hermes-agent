@@ -22,6 +22,8 @@ import {
 import { useI18n } from '@/i18n'
 import {
   type ChatMessage,
+  discardOpenClarifyToolCalls,
+  discardPendingClarifyToolCall,
   preserveLocalAssistantErrors,
   QUESTION_CARD_TOOLS,
   restorePendingClarifyToolCall,
@@ -63,6 +65,7 @@ import { $projectScope } from '@/store/project-scope'
 import { projectProfile, resolveNewSessionCwd } from '@/store/projects'
 import { clearAllPrompts } from '@/store/prompts'
 import { clearStoredTranscriptReadOnly, markStoredTranscriptReadOnly } from '@/store/read-only-transcript'
+import { openRouteTile } from '@/store/route-tiles'
 import {
   $activeSessionStoredIdRotation,
   $connection,
@@ -144,7 +147,13 @@ import type {
   UsageStats
 } from '@/types/hermes'
 
-import { navigateToWorkspacePage, NEW_CHAT_ROUTE, sessionRoute, SETTINGS_ROUTE } from '../../../routes'
+import {
+  isContributedRoute,
+  navigateToWorkspacePage,
+  NEW_CHAT_ROUTE,
+  sessionRoute,
+  SETTINGS_ROUTE
+} from '../../../routes'
 import type { ClientSessionState, SidebarNavItem } from '../../../types'
 import {
   pinStoredSessionForOwner,
@@ -201,6 +210,7 @@ import {
   resolveSessionProfile,
   resolveStoredSession,
   restoreListedSession,
+  runningProjectionStreamId,
   selectBranchMessages,
   sessionMatchesStoredId,
   sessionShouldHaveTranscript,
@@ -972,6 +982,15 @@ export function useSessionActions({
       }
 
       if (item.route) {
+        if (isContributedRoute(item.route)) {
+          // A plugin page is a TAB in the workspace strip (center), the same
+          // dock a sidebar session gets — not a split beside main. The row's
+          // right-click "Open in split" submenu is the explicit edge path.
+          openRouteTile(item.route, 'center')
+
+          return
+        }
+
         navigateToWorkspacePage(navigate, item.route)
       }
     },
@@ -1851,8 +1870,22 @@ export function useSessionActions({
                 )
               }
 
-              const pendingClarifyProjection = pendingClarify
-                ? restorePendingClarifyToolCall(activatedMessages, pendingClarifyToolPayload(pendingClarify))
+              // REST may outlive the request that authorized the early card.
+              // The shared request channel remains the only lifetime authority.
+              const currentClarifyRequest = $clarifyRequests.get()[cachedRuntimeId]
+              const pendingClarifyStillCurrent = Boolean(
+                pendingClarify && currentClarifyRequest?.requestId === pendingClarify.requestId
+              )
+              if (pendingClarify && !pendingClarifyStillCurrent) {
+                activatedMessages = discardPendingClarifyToolCall(
+                  activatedMessages,
+                  pendingClarifyToolPayload(pendingClarify),
+                  false
+                )
+              }
+
+              const pendingClarifyProjection = currentClarifyRequest
+                ? restorePendingClarifyToolCall(activatedMessages, pendingClarifyToolPayload(currentClarifyRequest))
                 : null
 
               const clearedClarifyProjection = clarifyAuthoritativelyAbsent
@@ -1863,16 +1896,19 @@ export function useSessionActions({
                   )
                 : null
 
+              const clarifyMessages = clearedClarifyProjection?.messages ?? activatedMessages
+              const visibleClarifyMessages = currentClarifyRequest
+                ? clarifyMessages
+                : discardOpenClarifyToolCalls(clarifyMessages)
               const pendingConnectionProjection = projectPendingConnection(
-                pendingClarifyProjection?.messages ?? clearedClarifyProjection?.messages ?? activatedMessages,
+                pendingClarifyProjection?.messages ?? visibleClarifyMessages,
                 pendingConnection
               )
 
               const visibleActivatedMessages =
                 pendingConnectionProjection?.messages ??
                 pendingClarifyProjection?.messages ??
-                clearedClarifyProjection?.messages ??
-                activatedMessages
+                visibleClarifyMessages
 
               if (!running) {
                 restoreSessionTodosFromSnapshot(
@@ -1897,11 +1933,15 @@ export function useSessionActions({
                 return {
                   ...state,
                   messages,
+                  streamId: state.busy ? (runningProjectionStreamId(messages, true) ?? state.streamId) : null,
                   transcriptProvenance:
                     acceptedPersistedDisplayTranscript || hasValidProvenance
                       ? (expectedProvenance ?? undefined)
                       : undefined,
                   ...livePromptStreamId(pendingConnectionProjection, pendingClarifyProjection),
+                  ...(pendingClarify && !pendingClarifyStillCurrent && !currentClarifyRequest
+                    ? { needsInput: Boolean(pendingConnection) }
+                    : {}),
                   ...(clearedClarifyProjection
                     ? {
                         streamId: state.busy ? (clearedClarifyProjection.streamId ?? state.streamId) : null
@@ -1930,8 +1970,9 @@ export function useSessionActions({
               saveTranscriptTail(
                 storedSessionId,
                 stripPendingClarifyProjectionForCache(
-                  activatedMessages,
-                  pendingClarify?.requestId ??
+                  visibleClarifyMessages,
+                  currentClarifyRequest?.requestId ??
+                    pendingClarify?.requestId ??
                     pendingClarifyState.cleared?.requestId ??
                     $clarifyRequests.get()[cachedRuntimeId]?.requestId
                 ),
@@ -2374,6 +2415,9 @@ export function useSessionActions({
             messages: visibleMessagesForView,
             transcriptProvenance,
             busy: resumedRunning,
+            streamId: resumedRunning
+              ? (runningProjectionStreamId(visibleMessagesForView, true) ?? state.streamId)
+              : null,
             awaitingResponse: resumedRunning && !recoveredInFlightTail,
             // Backend reported this turn running at resume time — live proof.
             turnLive: state.turnLive || resumedRunning,
@@ -2395,7 +2439,11 @@ export function useSessionActions({
             ...livePromptStreamId(pendingConnectionProjection, pendingClarifyProjection),
             ...(clearedClarifyProjection
               ? {
-                  streamId: resumedRunning ? (clearedClarifyProjection.streamId ?? state.streamId) : null
+                  streamId: resumedRunning
+                    ? (clearedClarifyProjection.streamId ??
+                      runningProjectionStreamId(visibleMessagesForView, true) ??
+                      state.streamId)
+                    : null
                 }
               : {})
           }),

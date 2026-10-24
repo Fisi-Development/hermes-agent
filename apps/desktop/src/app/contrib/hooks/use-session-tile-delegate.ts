@@ -33,23 +33,30 @@ import {
 import {
   $sessionTiles,
   publishSessionState,
+  sessionTileDelegate,
   sessionTileOwnerRoute,
   setSessionTileDelegate
 } from '@/store/session-states'
+import { restoreSessionTodosFromSnapshot } from '@/store/todos'
 import type { SessionResumeResult } from '@/types/hermes'
 
 import { refreshCronRunWriteGate } from '../../cron/open-cron-run'
 import type { usePromptActions } from '../../session/hooks/use-prompt-actions'
-import { singleFlightSessionResume } from '../../session/hooks/use-prompt-actions/single-flight-resume'
+import {
+  sessionResumeFlightKey,
+  singleFlightSessionResume
+} from '../../session/hooks/use-prompt-actions/single-flight-resume'
 import { markSessionRecentlyInterrupted, withSessionNotFoundResume } from '../../session/hooks/use-prompt-actions/utils'
 import type { useSessionActions } from '../../session/hooks/use-session-actions'
 import {
+  appendLiveSessionProjection,
   chatMessageArraysEquivalent,
   overlayConcurrentMessageChanges,
   preserveLocalPendingTurnMessages,
   reconcileResumeMessages,
   resolveResumedBusy,
-  resolveSessionOwner
+  resolveSessionOwner,
+  runningProjectionStreamId
 } from '../../session/hooks/use-session-actions/utils'
 import type { useSessionStateCache } from '../../session/hooks/use-session-state-cache'
 import type { ClientSessionState } from '../../types'
@@ -237,6 +244,9 @@ export function useSessionTileDelegate({
       return requestForSessionProfile<T>(owner, requestGateway, method, params, timeoutMs)
     }
 
+    // Retain owner-keyed hydration through the final cache write, not just the RPC.
+    const tileResumeByOwner = new Map<string, Promise<string>>()
+
     setSessionTileDelegate({
       archiveSession: async storedSessionId => {
         await archiveSession(storedSessionId)
@@ -313,6 +323,14 @@ export function useSessionTileDelegate({
             runtimeIdByStoredSessionIdRef.current.delete(storedSessionId)
           }
         }
+      },
+      invalidateRuntimeBinding: storedSessionId => {
+        const runtimeId = runtimeIdByStoredSessionIdRef.current.get(storedSessionId) ?? null
+        runtimeIdByStoredSessionIdRef.current.delete(storedSessionId)
+        if (runtimeId) {
+          sessionStateByRuntimeIdRef.current.delete(runtimeId)
+        }
+        return runtimeId
       },
       dropRuntimeBindings: storedSessionIds => {
         for (const storedSessionId of storedSessionIds) {
@@ -414,8 +432,31 @@ export function useSessionTileDelegate({
         // reading messages) without a profile lets the gateway fall back to the
         // launch-profile DB and fork the conversation into the wrong profile —
         // the same cross-profile bleed the recovery resumes had (#67603).
+        const initialTileOwnerKey = sessionResumeFlightKey(storedSessionId, sessionTileOwnerRoute(storedSessionId))
         const owner = await ownerForStoredSession(storedSessionId)
+        const ownerFlightKey = sessionResumeFlightKey(storedSessionId, owner)
+        const existingOwnerResume = tileResumeByOwner.get(ownerFlightKey)
+        if (existingOwnerResume) {
+          return existingOwnerResume
+        }
 
+        const continueThroughCurrentTileOwner = (): null | Promise<string> | string => {
+          const currentTile = $sessionTiles.get().find(tile => tile.storedSessionId === storedSessionId)
+          if (!currentTile || sessionResumeFlightKey(storedSessionId, currentTile.ownerRoute) === initialTileOwnerKey) {
+            return null
+          }
+          const currentRuntimeId = runtimeIdByStoredSessionIdRef.current.get(storedSessionId)
+          if (currentRuntimeId) {
+            return currentRuntimeId
+          }
+          const delegate = sessionTileDelegate()
+          if (!delegate) {
+            throw new Error('session owner changed while resume was in flight')
+          }
+          return delegate.resumeTile(storedSessionId, options)
+        }
+
+        const ownerResume = (async () => {
         const restScope = tileRestScope(owner)
 
         const prefetchPromise = authoritativeSnapshot
@@ -432,6 +473,11 @@ export function useSessionTileDelegate({
             cached.messages,
             olderPageReader(storedSessionId, restScope, prefetch)
           )
+
+          const retargetedRuntimeId = continueThroughCurrentTileOwner()
+          if (retargetedRuntimeId) {
+            return await retargetedRuntimeId
+          }
 
           // The overlap reads await; drop the page if the tile was rebound.
           if (sessionStateByRuntimeIdRef.current.get(existing)?.storedSessionId !== storedSessionId) {
@@ -488,7 +534,16 @@ export function useSessionTileDelegate({
           }
         )
 
+        const postResumeRuntimeId = continueThroughCurrentTileOwner()
+        if (postResumeRuntimeId) {
+          return await postResumeRuntimeId
+        }
+
         const prefetch = await prefetchPromise
+        const postHydrationRuntimeId = continueThroughCurrentTileOwner()
+        if (postHydrationRuntimeId) {
+          return await postHydrationRuntimeId
+        }
 
         if (outcome.mode === 'read-only') {
           const readOnlyId = readOnlyRuntimeIdFor(storedSessionId)
@@ -535,22 +590,17 @@ export function useSessionTileDelegate({
           runtimeId,
           state => {
             const previousMessages = state.messages.length > 0 ? state.messages : resumeRequestBaselineMessages
-
-            const messages = authoritativeSnapshot
+            const persistedMessages = authoritativeSnapshot
               ? resumed.messages.length > 0
-                ? overlayConcurrentMessageChanges(
-                    mergeTileTranscript(
-                      resumeRequestBaselineMessages,
-                      toChatMessages(resumed.messages),
-                      cached?.streamId
-                    ),
-                    resumeRequestBaselineMessages,
-                    previousMessages
-                  )
-                : previousMessages
-              : previousMessages.length > 0
-                ? previousMessages
-                : toChatMessages(prefetch?.messages ?? resumed.messages ?? [])
+                ? mergeTileTranscript(resumeRequestBaselineMessages, toChatMessages(resumed.messages), cached?.streamId)
+                : resumeRequestBaselineMessages
+              : toChatMessages(prefetch?.messages ?? resumed.messages ?? [])
+            const projectedMessages = appendLiveSessionProjection(persistedMessages, resumed)
+            const messages = overlayConcurrentMessageChanges(
+              projectedMessages,
+              authoritativeSnapshot ? resumeRequestBaselineMessages : persistedMessages,
+              previousMessages
+            )
 
             const busyChangedWhileResuming = cached
               ? Boolean(
@@ -574,13 +624,31 @@ export function useSessionTileDelegate({
                 : {}),
               awaitingResponse: running && !resumed.inflight?.assistant,
               busy: running,
+              turnLive: state.turnLive || running,
+              adoptedRunningTurn: state.adoptedRunningTurn || running,
+              streamId: running ? (runningProjectionStreamId(messages, true) ?? state.streamId) : null,
               messages
             }
           },
           storedSessionId
         )
 
+        restoreSessionTodosFromSnapshot(
+          runtimeId,
+          resumed.todo_state,
+          sessionStateByRuntimeIdRef.current.get(runtimeId)?.busy ?? Boolean(resumed.running ?? info?.running)
+        )
         return runtimeId
+        })()
+
+        tileResumeByOwner.set(ownerFlightKey, ownerResume)
+        try {
+          return await ownerResume
+        } finally {
+          if (tileResumeByOwner.get(ownerFlightKey) === ownerResume) {
+            tileResumeByOwner.delete(ownerFlightKey)
+          }
+        }
       },
       submitToSession: async (runtimeId, text) => {
         const storedSessionId = storedSessionIdForRuntime(runtimeId)

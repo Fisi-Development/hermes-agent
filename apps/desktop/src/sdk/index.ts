@@ -25,7 +25,7 @@ import { capabilityScoped, getApiRequestConnection } from '@/api/client'
 import { mutateSessionFenced } from '@/api/sessions'
 import { PRIMARY_SESSION_VIEW } from '@/app/chat/session-view'
 import { openSession, type OpenSessionIntent } from '@/app/open-session'
-import { syncWorkspaceRoute } from '@/app/routes'
+import { isContributedRoute, syncWorkspaceRoute } from '@/app/routes'
 import type { ClientSessionState } from '@/app/types'
 import {
   $newSessionTabAction,
@@ -60,6 +60,7 @@ import {
   retireLocalProfileGateways
 } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
+import { openRouteTile } from '@/store/route-tiles'
 import {
   $activeGatewayProfile,
   $gatewaySwapTarget,
@@ -643,6 +644,12 @@ export const host = {
     const to = path.startsWith('#') ? path.slice(1) : path
 
     window.location.hash = `#${to}`
+    if (isContributedRoute(to)) {
+      openRouteTile(to, 'center')
+
+      return
+    }
+
     // The router follows the hash and fronts the workspace pane on a route
     // CHANGE (wiring's `syncWorkspaceRoute` effect). Re-issuing the current
     // route — palette/statusbar/hotkey while already on the page with a tile

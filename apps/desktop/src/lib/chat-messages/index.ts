@@ -28,6 +28,8 @@ export {
 export {
   hasUnresolvedToolCall,
   QUESTION_CARD_TOOLS,
+  discardOpenClarifyToolCalls,
+  discardPendingClarifyToolCall,
   restorePendingBlockingToolCall,
   restorePendingClarifyToolCall,
   sealOpenToolParts,
